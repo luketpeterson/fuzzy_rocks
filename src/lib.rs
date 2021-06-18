@@ -143,25 +143,9 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
     /// unwrapped RocksDB error.
     fn insert_internal(&mut self, raw_key : &[u8], value : &T) -> Result<RecordID, String> {
 
-//GOATGOATGOAT, THis below is wrong.  We want to support duplicate keys.  Two distinct places might have exactly the same name.
-// This means we should create every time when we get here.
-
-        //See if we already have the key.
-        //If we do, we only want to update the records table with the new value.
-        //if we don't then we need to create a new record and also create all of the variants
-        let (new_record_id, need_to_create_variants) = match self.lookup_exact_internal(raw_key) {
-            Ok(existing_record_id) => {
-println!("use_existing {:?} - {}", existing_record_id, std::str::from_utf8(&raw_key).unwrap());
-                (existing_record_id, false)
-            },
-            Err(_err_str) => {
-                //We'll be creating a new record, so get the next unique record_id
-                let new_record_id = RecordID(self.record_count);
-                self.record_count += 1;
-println!("make_new!! {:?} - {}", new_record_id, std::str::from_utf8(&raw_key).unwrap());
-                (new_record_id, true)
-            }
-        };
+        //We'll be creating a new record, so get the next unique record_id
+        let new_record_id = RecordID(self.record_count);
+        self.record_count += 1;
 
         //Create the records structure, serialize it, and put in into the records table.
         //If we are updating an old record, we will overwrite it but the key and record_id will stay the same
@@ -175,33 +159,28 @@ println!("make_new!! {:?} - {}", new_record_id, std::str::from_utf8(&raw_key).un
         self.db.put_cf(records_cf_handle, usize::to_le_bytes(new_record_id.0), record_bytes)?;
 
         //Now add the variants to the table if this is the first time we're encountering this key
-        if need_to_create_variants {
-            let variants = Self::variants(&raw_key);
-            let variants_cf_handle = self.db.cf_handle(VARIANTS_CF_NAME).unwrap();
+        let variants = Self::variants(&raw_key);
+        let variants_cf_handle = self.db.cf_handle(VARIANTS_CF_NAME).unwrap();
 
-            //GOATGOAT DEBUG
-            if new_record_id.0 % 500 == 0 {
-                println!("bla {} turns into {}", std::str::from_utf8(&raw_key).unwrap(), variants.len());
-                println!("{}", new_record_id.0);
-            }
-            // println!("bla {} turns into {}", std::str::from_utf8(&raw_key).unwrap(), variants.len());
+        //GOATGOAT DEBUG
+        if new_record_id.0 % 500 == 0 {
+            println!("bla {} turns into {}", std::str::from_utf8(&raw_key).unwrap(), variants.len());
+            println!("{}", new_record_id.0);
+        }
+        // println!("bla {} turns into {}", std::str::from_utf8(&raw_key).unwrap(), variants.len());
 
-            //Add the new_record_id to each variant
-            for variant in variants {
-                //TODO: Benchmark using merge_cf() against using a combination of get_pinned_cf() and put_cf()
-                let val_bytes = Self::new_variant_vec(new_record_id);
-                //GOATGOATGOAT DEBUG
-                // println!("meerkat {:?}",new_record_id);
-                self.db.merge_cf(variants_cf_handle, variant, val_bytes)?;
-            }
+        //Add the new_record_id to each variant
+        for variant in variants {
+            //TODO: Benchmark using merge_cf() against using a combination of get_pinned_cf() and put_cf()
+            let val_bytes = Self::new_variant_vec(new_record_id);
+            self.db.merge_cf(variants_cf_handle, variant, val_bytes)?;
         }
 
         Ok(new_record_id)
     }
 
-//GOATGOATGOAT, This function should return an iterator because a key can have multiple valid entries
-    /// Checks the table for a record whose key precisely matches the key supplied
-    fn lookup_exact_internal(&self, raw_key : &[u8]) -> Result<RecordID, String> {
+    /// Checks the table for records with keys that precisely match the key supplied
+    fn lookup_exact_internal<'a>(&'a self, raw_key : &'a [u8]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
 
         let meaningful_key = Self::meaningful_key_substring(raw_key);
 
@@ -209,30 +188,40 @@ println!("make_new!! {:?} - {}", new_record_id, std::str::from_utf8(&raw_key).un
         let variants_cf_handle = self.db.cf_handle(VARIANTS_CF_NAME).unwrap();
         if let Some(variant_vec_bytes) = self.db.get_pinned_cf(variants_cf_handle, meaningful_key)? {
 
-            // Loop over all of the RecordIDs in the vec we got from the DB and see if any of their keys match the key we are looking up
-            for record_id_bytes in bincode_vec_iter::<RecordID>(&variant_vec_bytes) {
+            let record_id_iter = bincode_vec_iter::<RecordID>(&variant_vec_bytes)
+                .filter_map(|record_id_bytes| {
+                    
+                    // Return only the RecordIDs for records if their keys match the key we are looking up
+                    if let Some(record_bytes) = self.db.get_pinned_cf(records_cf_handle, record_id_bytes).unwrap() {
 
-                if let Some(record_bytes) = self.db.get_pinned_cf(records_cf_handle, record_id_bytes)? {
-
-                    //Get the key from the record we just looked up in the DB
-                    //NOTE: Fully decoding the record is a lot of unnecessary work.  It's probably faster just to
-                    // peek inside it.
-                    // let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
-                    // let record : RecordDeser::<T, UNICODE_KEYS> = record_coder.deserialize(&record_bytes).unwrap();
-                    let record_key = bincode_string_varint(&record_bytes as &[u8]);
-
-                    //If the full key in the DB matches the key we're checking return the RecordID
-                    if *record_key == *raw_key {
-                        return Ok(RecordID(usize::from_le_bytes(record_id_bytes.try_into().unwrap())));
+                        //Get the key from the record we just looked up in the DB
+                        //NOTE: Fully decoding the record is a lot of unnecessary work.  It's probably faster just to
+                        // peek inside it.
+                        // let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
+                        // let record : RecordDeser::<T, UNICODE_KEYS> = record_coder.deserialize(&record_bytes).unwrap();
+                        let record_key = bincode_string_varint(&record_bytes as &[u8]);
+    
+                        //If the full key in the DB matches the key we're checking return the RecordID
+                        if *record_key == *raw_key {
+                            Some(RecordID(usize::from_le_bytes(record_id_bytes.try_into().unwrap())))
+                        } else {
+                            None
+                        }
+                    } else {
+                        panic!("Internal Error: bad record_id in variant");
                     }
-                } else {
-                    return Err("Internal Error: bad record_id in variant".to_string());
-                }
-            }
+                });
 
-            Err("No Record Found Matching Key".to_string())
+            //I guess it's simpler (and more efficeint) to assemble the results in a vec than to try
+            // and keep the iterator machinations alive outside this function
+            let record_ids : Vec<RecordID> = record_id_iter.collect();
+
+            Ok(record_ids.into_iter())
+
         } else {
-            Err("No Record Found Matching Key".to_string())
+
+            //No variant found, so return an empty Iterator
+            Ok(vec![].into_iter())
         }
     }
 
@@ -394,6 +383,13 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
         self.insert_internal(key.as_bytes(), value)
     }
 
+    /// Locates all records in the table with keys that precisely match the key supplied
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn lookup_exact<'a>(&'a self, key : &'a str) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
+        self.lookup_exact_internal(key.as_bytes())
+    }
 
 }
 
