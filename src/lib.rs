@@ -1,14 +1,12 @@
 
 /// A persistent key-value store backed by RocksDB with fuzzy lookup using an arbitrary distance function that is accelerated by the SymSpell algorithm.
 ///
+/// TODO: Say a bit about the proper use cases.  e.g. a persistent database, optimized to load quickly and not require too much resident memory.  As opposed to quick lookups
+/// Talk about how lookup keys are not unique, and how only a RecordID is guarenteed to be unique.
 
-// Copy-mode and reference-mode??  Discuss it, but only implement copy-mode
-//
-
-//GOATGOAT
-// Main object will be called "Table".  Two parameters.  1.) MAX_SEARCH_DISTANCE 2.) KEY_IS_UNICODE?
 
 //Optional score structure so deletes, inserts, transposes, and substitutions can be weighted differently
+// Beter idea: this is implicit in the distance function that's provided for fuzzy lookups
 
 // lookup function will:
 //1. decompose search key into all delete-based permutations
@@ -18,7 +16,10 @@
 //4. See if the original key qualifies under the threshold and distance whatever criteria, and filter it out if it doesn't
 //
 
-
+//GOATGOAT Next work:
+// Create lookup_fuzzy that takes a distance function and a max_distance, and returns a RecordID iterator
+// Create a get_fuzzy that takes a distance function, and returns the best match T, and its distance
+// Create a remove function that takes a RecordID, and deletes the record at that RecordID.  Replaces the record with a dead sentinel, and scrubs references to it out of the variants table
 
 use core::marker::PhantomData;
 
@@ -82,7 +83,6 @@ struct RecordDeser<T : serde::de::DeserializeOwned, const UNICODE_KEYS : bool> {
     value : T
 }
 
-//GOATGOATGOAT, Make the RecordID be a special type, and add a function to get them directly, along with a function to scrub them out of the table.
 #[derive(Copy, Debug, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, derive_more::Display, Serialize, Deserialize)]
 pub struct RecordID(usize);
 
@@ -97,36 +97,26 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
     /// unwrapped RocksDB error.
     pub fn new(path : &str) -> Result<Self, String> {
 
+        //Configure the "records" column family
         let records_cf = ColumnFamilyDescriptor::new(RECORDS_CF_NAME, rocksdb::Options::default());
 
+        //Configure the "variants" column family
         let mut variants_opts = rocksdb::Options::default();
         variants_opts.create_if_missing(true);
         variants_opts.set_merge_operator_associative("append to RecordID vec", Self::variant_append_merge);
         let variants_cf = ColumnFamilyDescriptor::new(VARIANTS_CF_NAME, variants_opts);
 
+        //Configure the database itself
         let mut db_opts = rocksdb::Options::default();
         db_opts.create_missing_column_families(true);
         db_opts.create_if_missing(true);
 
+        //Open the database
         let db = DB::open_cf_descriptors(&db_opts, path, vec![records_cf, variants_cf])?;
 
+        //Find the maximum RecordID, by probing the keys in the "records" column family
         let records_cf_handle = db.cf_handle(RECORDS_CF_NAME).unwrap();
-
-        //GOATGOATGOAT, Dead test code
-        // db.put_cf(records_cf_handle, usize::to_le_bytes(0), b"bobby").unwrap();
-        // db.put_cf(records_cf_handle, usize::to_le_bytes(1), b"bobby").unwrap();
-        // db.put_cf(records_cf_handle, usize::to_le_bytes(2), b"bobby").unwrap();
-        // db.put_cf(records_cf_handle, usize::to_le_bytes(3), b"bobby").unwrap();
-        // db.put_cf(records_cf_handle, usize::to_le_bytes(4), b"bobby").unwrap();
-        // db.put_cf(records_cf_handle, usize::to_le_bytes(5), b"bobby").unwrap();
-        // db.put_cf(records_cf_handle, usize::to_le_bytes(6), b"bobby").unwrap();
-        // db.put_cf(records_cf_handle, usize::to_le_bytes(7), b"bobby").unwrap();
-        // db.put_cf(records_cf_handle, usize::to_le_bytes(8), b"bobby").unwrap();
-
         let record_count = probe_for_max_sequential_key(&db, records_cf_handle, 255)?;
-
-        //GOATGOATGOAT
-        // println!("max = {}", record_count);
 
         Ok(Self {
             record_count : record_count,
@@ -256,7 +246,13 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
     // The function to add a new entry for a variant in the database, formulated as a RocksDB callback
     fn variant_append_merge(_key: &[u8], existing_val: Option<&[u8]>, operands: &mut MergeOperands) -> Option<Vec<u8>> {
 
-// println!("Append-Called {:?}", std::str::from_utf8(key).unwrap());
+        // Note: I've seen this function be called at odd times by RocksDB, such as when a DB is
+        // opened.  I haven't been able to get a straight answer on why RocksDB calls this function
+        // unnecessarily, but it doesn't seem to be hurting performance much.
+
+        //TODO: Status prints in this function to understand the behavior of RocksDB.
+        // Remove them when this is understood.
+        // println!("Append-Called {:?}", std::str::from_utf8(key).unwrap());
         let vec_coder = bincode::DefaultOptions::new().with_fixint_encoding().with_little_endian();
 
         //Deserialize the existing database entry into a vec of RecordIDs
@@ -265,8 +261,9 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
             new_vec
         } else {
 
-// println!("MERGE WITH NONE!!");
-            Vec::with_capacity(1)
+            //TODO: Remove status println!()
+            // println!("MERGE WITH NONE!!");
+            Vec::with_capacity(operands.size_hint().0)
         };
 
         //Add the new RecordID(s)
@@ -276,7 +273,8 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
             variant_vec.extend(operand_vec);
         }
 
-// println!("Appending {:?}", variant_vec);
+        //TODO: Remove status println!()
+        // println!("AppendResults {:?}", variant_vec);
 
         //Serialize the vec back out again
         let result = vec_coder.serialize(&variant_vec).unwrap();
@@ -462,16 +460,18 @@ fn probe_for_max_sequential_key(db : &DBWithThreadMode<rocksdb::SingleThreaded>,
 /// i.e. 64-bit usize types and [LittleEndian](bincode::config::LittleEndian) byte order.  Any other
 /// configuration and your data may be corrupt.
 /// 
-/// TODO: Try with `with_varint_encoding` rather than `with_fixint_encoding`, and measure performance.
-/// It's highly likely that the data compression completely makes up for the extra work and copy
-/// deserializing the structure, and it's faster not to mess with the 
+/// TODO: Try using `with_varint_encoding` rather than `with_fixint_encoding`, and measure performance.
+/// It's highly likely that the data size reduction completely makes up for the extra work and memcpy incurred
+/// deserializing the structure, and it's faster not to mess with trying to read the buffer without fully
+/// deserializing it.
 struct BinCodeVecIterator<'a, T : Sized + Copy> {
     remaining_buf : &'a [u8],
     phantom: PhantomData<&'a T>,
 }
 
-/// Returns the length of a Vec<T> that has been encoded with bincode, using [FixintEncoding](bincode::config::FixintEncoding)
-/// and [LittleEndian](bincode::config::LittleEndian) byte order.
+/// Returns the length of a Vec<T> that has been encoded with bincode, using
+/// [FixintEncoding](bincode::config::FixintEncoding) and
+/// [LittleEndian](bincode::config::LittleEndian) byte order.
 fn bincode_vec_fixint_len(buf : &[u8]) -> usize {
 
     let (len_chars, _remainder) = buf.split_at(8);
@@ -567,71 +567,6 @@ fn bincode_string_varint(buf : &[u8]) -> &[u8] {
     string_slice
 }
 
-//--///////////////////////////////////////////////////////////////////////////////////////////
-// DEAD CODE, Failed Experiment in a complete Vec-like type over a &[u8] buffer
-//--///////////////////////////////////////////////////////////////////////////////////////////
-
-
-//I decided against this approach.  even though it would theoretically be more efficient, especially on
-// the read-side because the memory of the bytes buffer could be treated as a vec in-place without any
-// copies.  I have it all working, but ultimately shelved the approach in favor of serde and bincode,
-// because of the dependency on the nightly toolchain and the complications around endian-ness and other
-// memory-layout assumptions permeating the format in the database.
-
-// I also realized I could create a safer and simpler iterator over the entries in bincode format.
-// so when just reading is required, you can use that iterator, and when writing is also required, there
-// is basically no performance to be gained by avoiding the bincode deserialization and reserialization.
-
-//BlobVec test
-// let forty_two : i32 = 42;
-// let blob = BlobVec::new([forty_two]);
-// let blob = blob.push_clone(22);
-// let blob_buffer : &[u8] = blob.as_ref();
-// println!("size = {}, {:?}", blob_buffer.len(), blob_buffer);
-
-// /// A Vec-like type, where the entire contents as well as the header data are in a single blob in memory
-// /// 
-// /// **WARNING** No byte-order conversion is performed when types are serialized and deserialized into the
-// /// database.  Therefore you may not build a database on a little-endian architecture and use it on a
-// /// big-endian architecture or vice-versa.
-// #[warn(dead_code)]
-// struct BlobVec<T : Sized + Copy + Debug, const LEN : usize> {
-//     len : usize, //len is here so it gets serialized out
-//     contents : [T; LEN]
-// }
-
-// impl <T: Sized + Copy + Debug, const LEN : usize>BlobVec<T, LEN> {
-
-//     pub fn new(contents : [T; LEN]) -> Self {
-//         Self {
-//             len : LEN,
-//             contents : contents
-//         }
-//     }
-
-//     pub fn len(&self) -> usize {
-//         LEN
-//     }
-
-//     pub fn push_clone(&self, item : T) -> BlobVec<T, {LEN+1}> {
-//         let mut new_contents = self.contents.to_vec();
-//         new_contents.push(item);
-//         BlobVec::new(new_contents.try_into().unwrap())
-//     }
-// }
-
-// impl <T: Sized + Copy + Debug, const LEN : usize>AsRef<[u8]> for BlobVec<T, LEN>
-// {
-//     fn as_ref(&self) -> &[u8] {
-//         unsafe {
-//             ::std::slice::from_raw_parts(
-//                 (self as *const BlobVec<T, LEN>) as *const u8,
-//                 ::std::mem::size_of::<BlobVec<T, LEN>>(),
-//             )
-//         }
-//     }
-// }
-
 #[cfg(test)]
 mod tests {
     use crate::{*};
@@ -640,6 +575,19 @@ mod tests {
 
     #[test]
     fn fuzzy_rocks_test() {
+
+        //GOATGOAT, Replace the sqlite calls here with just using csv-parsing of the geonames files,
+        //so this test can be more portable.
+
+        //Also, I want to test the each of the entry points, along with a test for:
+        //Resetting databaase
+        //Fuzzy lookup with excellent match
+        //Fuzzy lookup with okay match
+        //Fuzzy lookup with no match inside threshold
+        //Exact Lookup
+        //Exact Lookup where nothing is found
+        //Exact Lookup where there is an exact match up to "meaningful length", but not an exact match
+        //Deleting a record
 
         //Open the SQLite connection and set up the query
         let connection = sqlite::open("data_store.sqlite").unwrap();
@@ -660,22 +608,6 @@ mod tests {
         let mut table = Table::<i64, 3, 12, true>::new("goat.rocks").unwrap();
 
 
-//BinCode test
-let forty_two : i32 = 42;
-let mut my_vec = vec![forty_two, 22];
-my_vec.push(987);
-
-
-let bincode_serde = bincode::DefaultOptions::new().with_fixint_encoding().with_little_endian();
-
-let bytes_buf = bincode_serde.serialize(&my_vec).unwrap();
-println!("size = {}, {:?}", bytes_buf.len(), bytes_buf);
-
-println!("len {}", bincode_vec_fixint_len(&bytes_buf));
-for item in bincode_vec_iter::<i32>(&bytes_buf[..]) {
-    println!("size = {}, {:?}", item.len(), item);
-}
-
     // return;
 
         //Iterate over all of the rows returned by the sqlite query, and load them into Rocks
@@ -683,9 +615,9 @@ for item in bincode_vec_iter::<i32>(&bytes_buf[..]) {
 
             let geonameid = query.read::<i64>(0).unwrap();
             let name = query.read::<String>(1).unwrap();
-            let population = query.read::<i64>(14).unwrap();
+            let _population = query.read::<i64>(14).unwrap();
 
-            let record_id = table.insert(&name, &geonameid).unwrap();
+            let _record_id = table.insert(&name, &geonameid).unwrap();
         }
         
     }
