@@ -214,13 +214,15 @@ println!("make_new!! {:?} - {}", new_record_id, std::str::from_utf8(&raw_key).un
 
                 if let Some(record_bytes) = self.db.get_pinned_cf(records_cf_handle, record_id_bytes)? {
 
-                    //TODO: Make a way to read the key without doing a full deserialize and copying the data
                     //Get the key from the record we just looked up in the DB
-                    let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
-                    let record : RecordDeser::<T, UNICODE_KEYS> = record_coder.deserialize(&record_bytes).unwrap();
-        
+                    //NOTE: Fully decoding the record is a lot of unnecessary work.  It's probably faster just to
+                    // peek inside it.
+                    // let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
+                    // let record : RecordDeser::<T, UNICODE_KEYS> = record_coder.deserialize(&record_bytes).unwrap();
+                    let record_key = bincode_string_varint(&record_bytes as &[u8]);
+
                     //If the full key in the DB matches the key we're checking return the RecordID
-                    if *record.key == *raw_key {
+                    if *record_key == *raw_key {
                         return Ok(RecordID(usize::from_le_bytes(record_id_bytes.try_into().unwrap())));
                     }
                 } else {
@@ -472,8 +474,9 @@ struct BinCodeVecIterator<'a, T : Sized + Copy> {
     phantom: PhantomData<&'a T>,
 }
 
-/// Returns the length of a Vec<T> that has been encoded with bincode
-fn bincode_vec_len(buf : &[u8]) -> usize {
+/// Returns the length of a Vec<T> that has been encoded with bincode, using [FixintEncoding](bincode::config::FixintEncoding)
+/// and [LittleEndian](bincode::config::LittleEndian) byte order.
+fn bincode_vec_fixint_len(buf : &[u8]) -> usize {
 
     let (len_chars, _remainder) = buf.split_at(8);
     usize::from_le_bytes(len_chars.try_into().unwrap())
@@ -510,6 +513,63 @@ impl <'a, T : Sized + Copy>Iterator for BinCodeVecIterator<'a, T> {
     }
 }
 
+/// Interprets the bytes at the start of `buf` as an encoded 64-bit unsigned number that has been
+/// encoded with bincode, using [VarintEncoding](bincode::config::VarintEncoding) and
+/// [LittleEndian](bincode::config::LittleEndian) byte order.
+/// 
+/// Returns the encoded value, and sets `num_bytes` to the number of bytes in the buffer used to encode
+/// the value.
+fn bincode_u64_le_varint(buf : &[u8], num_bytes : &mut usize) -> u64 {
+
+    match buf[0] {
+        251 => {
+            let (_junk_char, remainder) = buf.split_at(1);
+            let (len_chars, _remainder) = remainder.split_at(2);
+            let value = u16::from_le_bytes(len_chars.try_into().unwrap());
+            *num_bytes = 3;
+            value as u64
+        },
+        252 => {
+            let (_junk_char, remainder) = buf.split_at(1);
+            let (len_chars, _remainder) = remainder.split_at(4);
+            let value = u32::from_le_bytes(len_chars.try_into().unwrap());
+            *num_bytes = 5;
+            value as u64
+        },
+        253 => {
+            let (_junk_char, remainder) = buf.split_at(1);
+            let (len_chars, _remainder) = remainder.split_at(8);
+            let value = u64::from_le_bytes(len_chars.try_into().unwrap());
+            *num_bytes = 9;
+            value
+        },
+        254 => {
+            let (_junk_char, remainder) = buf.split_at(1);
+            let (len_chars, _remainder) = remainder.split_at(16);
+            let value = u128::from_le_bytes(len_chars.try_into().unwrap());
+            *num_bytes = 17;
+            value as u64
+        },
+        _ => {
+            *num_bytes = 1;
+            buf[0] as u64
+        }
+    }
+}
+
+/// Returns a slice representing the characters of a String that has been encoded with bincode, using
+/// [VarintEncoding](bincode::config::VarintEncoding) and [LittleEndian](bincode::config::LittleEndian) byte order.
+fn bincode_string_varint(buf : &[u8]) -> &[u8] {
+
+    //Interpret the length
+    let mut skip_bytes = 0;
+    let string_len = bincode_u64_le_varint(buf, &mut skip_bytes);
+
+    //Split the slice to grab the string
+    let (_len_chars, remainder) = buf.split_at(skip_bytes);
+    let (string_slice, _remainder) = remainder.split_at(string_len as usize);
+    string_slice
+}
 
 //--///////////////////////////////////////////////////////////////////////////////////////////
 // DEAD CODE, Failed Experiment in a complete Vec-like type over a &[u8] buffer
@@ -615,7 +675,7 @@ let bincode_serde = bincode::DefaultOptions::new().with_fixint_encoding().with_l
 let bytes_buf = bincode_serde.serialize(&my_vec).unwrap();
 println!("size = {}, {:?}", bytes_buf.len(), bytes_buf);
 
-println!("len {}", bincode_vec_len(&bytes_buf));
+println!("len {}", bincode_vec_fixint_len(&bytes_buf));
 for item in bincode_vec_iter::<i32>(&bytes_buf[..]) {
     println!("size = {}, {:?}", item.len(), item);
 }
