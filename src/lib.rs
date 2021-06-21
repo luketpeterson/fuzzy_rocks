@@ -3,7 +3,7 @@
 ///
 /// TODO: Say a bit about the proper use cases.  e.g. a persistent database, optimized to load quickly and not require too much resident memory.  As opposed to quick lookups
 /// Talk about how lookup keys are not unique, and how only a RecordID is guarenteed to be unique.
-
+///
 
 //Optional score structure so deletes, inserts, transposes, and substitutions can be weighted differently
 // Beter idea: this is implicit in the distance function that's provided for fuzzy lookups
@@ -11,9 +11,9 @@
 // lookup function will:
 //1. decompose search key into all delete-based permutations
 //2. Iterate over all permutations and perform lookup into the RocksDB
-//3. If there is a value, iterate over all of the original keys represented...
-//      I guess that means I need to have a separate namespace or table for original keys...
-//4. See if the original key qualifies under the threshold and distance whatever criteria, and filter it out if it doesn't
+//3. If there is a value, iterate over all of the original keys represented, and add each one to a candidate hash
+//      The candidate hash is an optimization because there will likely be many variants in common betweek a given lookup key and a given stored record key
+//4. See if the original key qualifies under the distance function and threshold distance criteria, and filter it out if it doesn't
 //
 
 //GOATGOAT Next work:
@@ -38,7 +38,9 @@ use rocksdb::{DB, DBWithThreadMode, ColumnFamily, ColumnFamilyDescriptor, MergeO
 /// and therefore the `distance_function` will not have an opportunity to evaluate the match.  However,
 /// if `MAX_SEARCH_DISTANCE` is too large, it will hurt performance by evaluating too many candidates.
 /// 
-/// Empirically, values between 2 and 3 are good in most situations I have found.
+/// Empirically, values near 2 seem to be good in most situations I have found.  I.e. 1 and 3 might be
+/// appropriate sometimes.  4 ends up exploding in most cases I've seen so the SymSpell logic may not
+/// be a good fit if you need to find keys 4 edits away.  0 edits is an exact match.
 /// 
 /// -`MEANINGFUL_KEY_LEN` is an optimization where only a subset of the key is used for creating
 /// variants.  So, if `MEANINGFUL_KEY_LEN = 10` then only the first 10 characters of the key will be used
@@ -78,7 +80,7 @@ struct RecordSer<'a, T : Serialize, const UNICODE_KEYS : bool> {
 
 #[derive(Deserialize)]
 struct RecordDeser<T : serde::de::DeserializeOwned, const UNICODE_KEYS : bool> {
-    key : Box<[u8]>, //NOTE: we could avoid this allocation with a maximum_key_length, but currently we don't have one
+    key : Box<[u8]>, //NOTE: we could avoid this secondary allocation with a maximum_key_length, but currently we don't have one
     #[serde(bound(deserialize = "T: serde::de::DeserializeOwned"))]
     value : T
 }
@@ -91,7 +93,11 @@ const VARIANTS_CF_NAME : &str = "variants";
 
 impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DISTANCE : usize, const MEANINGFUL_KEY_LEN : usize, const UNICODE_KEYS : bool>Table<T, MAX_SEARCH_DISTANCE, MEANINGFUL_KEY_LEN, UNICODE_KEYS> {
 
-    /// Creates a new Table, backed by the path provided
+    /// Creates a new Table, backed by the database at the path provided
+    /// 
+    /// WARNING:  No sanity checks are performed to ensure the database being opened matches the parameters
+    /// of the table being created.  Therefore you may see bugs if you are opening a table that was created
+    /// using a different set of parameters.
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
@@ -150,7 +156,6 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
 
         //Now add the variants to the table if this is the first time we're encountering this key
         let variants = Self::variants(&raw_key);
-        let variants_cf_handle = self.db.cf_handle(VARIANTS_CF_NAME).unwrap();
 
         //GOATGOAT DEBUG
         if new_record_id.0 % 500 == 0 {
@@ -160,6 +165,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
         // println!("bla {} turns into {}", std::str::from_utf8(&raw_key).unwrap(), variants.len());
 
         //Add the new_record_id to each variant
+        let variants_cf_handle = self.db.cf_handle(VARIANTS_CF_NAME).unwrap();
         for variant in variants {
             //TODO: Benchmark using merge_cf() against using a combination of get_pinned_cf() and put_cf()
             let val_bytes = Self::new_variant_vec(new_record_id);
@@ -167,6 +173,38 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
         }
 
         Ok(new_record_id)
+    }
+
+    /// Returns an iterator over all possible candidates for a given fuzzy search key, based on
+    /// MAX_SEARCH_DISTANCE, without any distance function applied
+    fn fuzzy_candidates_iter<'a>(&'a self, raw_key : &'a [u8]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
+
+        //Create all of the potential variants based off of the "meaningful" part of the key
+        let variants = Self::variants(&raw_key);
+
+        //Create a new HashSet to hold all of the RecordIDs that we find
+        let mut result_set = HashSet::new(); //TODO, may want to allocate this with a non-zero capacity
+
+        //Check to see if we have entries in the "variants" database for any of the key variants
+        let variants_cf_handle = self.db.cf_handle(VARIANTS_CF_NAME).unwrap();
+        for variant in variants {
+            if let Some(variant_vec_bytes) = self.db.get_pinned_cf(variants_cf_handle, variant)? {
+
+                //If we have an entry in the variants database, add all of the referenced RecordIDs to our results
+                for record_id_bytes in bincode_vec_iter::<RecordID>(&variant_vec_bytes) {
+                    result_set.insert(RecordID(usize::from_le_bytes(record_id_bytes.try_into().unwrap())));
+                }
+            }
+        }
+
+        //Turn our results into an iter for the return value
+        Ok(result_set.into_iter())
+    }
+
+    fn lookup_fuzzy_internal<'a>(&'a self, raw_key : &'a [u8]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
+        //GOATGOAT, TODO: apply a distance function and a threshold, and then filter the results based on them
+        //Make part of this implementation shared, so that the version that returns the value can reuse most of it
+        self.fuzzy_candidates_iter(raw_key)
     }
 
     /// Checks the table for records with keys that precisely match the key supplied
@@ -219,7 +257,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn get_with_record_id(&self, record_id : RecordID) -> Result<T, String> {
+    pub fn get_value_with_record_id(&self, record_id : RecordID) -> Result<T, String> {
 
         //Get the Record structure by deserializing the bytes from the db
         let records_cf_handle = self.db.cf_handle(RECORDS_CF_NAME).unwrap();
@@ -228,6 +266,25 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
             let record : RecordDeser::<T, UNICODE_KEYS> = record_coder.deserialize(&record_bytes).unwrap();
 
             Ok(record.value)
+        } else {
+            Err("Invalid record_id".to_string())
+        }
+    }
+
+    /// Returns the key and value at a specified record.  This function will be faster than doing a
+    /// fuzzy lookup
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    fn get_with_record_id_internal(&self, record_id : RecordID) -> Result<(Box<[u8]>, T), String> {
+
+        //Get the Record structure by deserializing the bytes from the db
+        let records_cf_handle = self.db.cf_handle(RECORDS_CF_NAME).unwrap();
+        if let Some(record_bytes) = self.db.get_pinned_cf(records_cf_handle, record_id.0.to_le_bytes())? {
+            let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
+            let record : RecordDeser::<T, UNICODE_KEYS> = record_coder.deserialize(&record_bytes).unwrap();
+
+            Ok((record.key, record.value))
         } else {
             Err("Invalid record_id".to_string())
         }
@@ -381,12 +438,25 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
         self.insert_internal(key.as_bytes(), value)
     }
 
+    /// Returns the key and value at a specified record.  This function will be faster than doing a
+    /// fuzzy lookup
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn get_with_record_id(&self, record_id : RecordID) -> Result<(String, T), String> {
+        self.get_with_record_id_internal(record_id).map(|(key, val)| (String::from_utf8(key.to_vec()).unwrap(), val))
+    }
+
     /// Locates all records in the table with keys that precisely match the key supplied
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn lookup_exact<'a>(&'a self, key : &'a str) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
         self.lookup_exact_internal(key.as_bytes())
+    }
+
+    pub fn lookup_fuzzy<'a>(&'a self, key : &'a str) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
+        self.lookup_fuzzy_internal(key.as_bytes())
     }
 
 }
@@ -605,20 +675,34 @@ mod tests {
         // }
 
         //Create the FuzzyRocks Table
-        let mut table = Table::<i64, 3, 12, true>::new("goat.rocks").unwrap();
+        let mut table = Table::<i64, 2, 12, true>::new("goat.rocks").unwrap();
+
+        // //Commented out because we only need to build the database once
+        // //Iterate over all of the rows returned by the sqlite query, and load them into Rocks
+        // while let State::Row = query.next().unwrap() {
+
+        //     let geonameid = query.read::<i64>(0).unwrap();
+        //     let name = query.read::<String>(1).unwrap();
+        //     let _population = query.read::<i64>(14).unwrap();
+
+        //     let _record_id = table.insert(&name, &geonameid).unwrap();
+        // }
 
 
-    // return;
+        // //How bad is it??  How many entries do we have in really common variants, like single characters?
+        // //ANSWER: anywhere from 50 to 1000, out of 50,000 records in the table (all cities pop > 5000),
+        // // a MAX_SEARCH_DISTANCE = 3, and a MEANINGFUL_KEY_LEN = 12
+        // let variants_cf_handle = table.db.cf_handle(VARIANTS_CF_NAME).unwrap();
+        // if let Some(variant_vec_bytes) = table.db.get_pinned_cf(variants_cf_handle, b"o").unwrap() {
+        //     println!("len = {}", bincode_vec_fixint_len(&variant_vec_bytes));
+        // }
+        // drop(variants_cf_handle);
 
-        //Iterate over all of the rows returned by the sqlite query, and load them into Rocks
-        while let State::Row = query.next().unwrap() {
-
-            let geonameid = query.read::<i64>(0).unwrap();
-            let name = query.read::<String>(1).unwrap();
-            let _population = query.read::<i64>(14).unwrap();
-
-            let _record_id = table.insert(&name, &geonameid).unwrap();
+        //for record in table.lookup_fuzzy("salt Bake City").unwrap() {
+        for record in table.lookup_fuzzy("havre").unwrap() {
+            let (key, val) = table.get_with_record_id(record).unwrap();
+            println!("result_id = {}, key = {}, val = {}", record, key, val);
         }
-        
+
     }
 }
