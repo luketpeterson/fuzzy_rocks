@@ -76,6 +76,9 @@ struct RecordDeser<T : serde::de::DeserializeOwned, const UNICODE_KEYS : bool> {
 
 #[derive(Copy, Debug, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, derive_more::Display, Serialize, Deserialize)]
 pub struct RecordID(usize);
+impl RecordID {
+    pub const NULL : RecordID = RecordID(usize::MAX);
+}
 
 const RECORDS_CF_NAME : &str = "records";
 const VARIANTS_CF_NAME : &str = "variants";
@@ -121,6 +124,29 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
         })
     }
 
+    /// Resets a Table, dropping every record in the table and restoring it to an empty state.
+    /// 
+    /// (Dropping in a database sense, not a Rust sense)
+    pub fn reset(&mut self) -> Result<(), String> {
+        
+        //Drop both the "records" and the "variants" column families
+        self.db.drop_cf(RECORDS_CF_NAME)?;
+        self.db.drop_cf(VARIANTS_CF_NAME)?;
+
+        //Recreate the "records" column family
+        self.db.create_cf(RECORDS_CF_NAME, &rocksdb::Options::default())?;
+
+        //Recreate the "variants" column family
+        let mut variants_opts = rocksdb::Options::default();
+        variants_opts.create_if_missing(true);
+        variants_opts.set_merge_operator_associative("append to RecordID vec", Self::variant_append_merge);
+        self.db.create_cf(VARIANTS_CF_NAME, &variants_opts)?;
+
+        //Reset the record_count, so newly inserted entries begin at 0 again
+        self.record_count = 0;
+        Ok(())
+    }
+
     /// Inserts a record into the Table, called by insert(), which is implemented differently depending
     /// on the UNICODE_KEYS constant
     /// 
@@ -145,13 +171,6 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
 
         //Now add the variants to the table if this is the first time we're encountering this key
         let variants = Self::variants(&raw_key);
-
-        //GOATGOAT DEBUG
-        if new_record_id.0 % 500 == 0 {
-            println!("bla {} turns into {}", std::str::from_utf8(&raw_key).unwrap(), variants.len());
-            println!("{}", new_record_id.0);
-        }
-        // println!("bla {} turns into {}", std::str::from_utf8(&raw_key).unwrap(), variants.len());
 
         //Add the new_record_id to each variant
         let variants_cf_handle = self.db.cf_handle(VARIANTS_CF_NAME).unwrap();
@@ -606,14 +625,15 @@ struct BinCodeVecIterator<'a, T : Sized + Copy> {
     phantom: PhantomData<&'a T>,
 }
 
-/// Returns the length of a Vec<T> that has been encoded with bincode, using
-/// [FixintEncoding](bincode::config::FixintEncoding) and
-/// [LittleEndian](bincode::config::LittleEndian) byte order.
-fn bincode_vec_fixint_len(buf : &[u8]) -> usize {
+//Currently unused
+// /// Returns the length of a Vec<T> that has been encoded with bincode, using
+// /// [FixintEncoding](bincode::config::FixintEncoding) and
+// /// [LittleEndian](bincode::config::LittleEndian) byte order.
+// fn bincode_vec_fixint_len(buf : &[u8]) -> usize {
 
-    let (len_chars, _remainder) = buf.split_at(8);
-    usize::from_le_bytes(len_chars.try_into().unwrap())
-}
+//     let (len_chars, _remainder) = buf.split_at(8);
+//     usize::from_le_bytes(len_chars.try_into().unwrap())
+// }
 
 /// Returns a [BinCodeVecIterator] to iterate over a Vec<T> that has been encoded with bincode,
 /// without requiring an actual [Vec] to be recreated in memory
@@ -707,14 +727,104 @@ fn bincode_string_varint(buf : &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use crate::{*};
-    use sqlite::State;
+    use std::fs;
+    use csv::ReaderBuilder;
+    use serde::{Deserialize};    
 
+    #[test]
+    /// This test is designed to stress the database with many thousand entries.
+    ///  
+    /// You may download an alternate GeoNames file in order to get a more rigorous test.
+    /// A geonames file may be downloaded from: http://download.geonames.org/export/dump/cities15000.zip
+    /// for the smallest file, and "cities500.zip" for the largest, depending on whether you want this
+    /// to pass in the a lightweight way or the most thorough.
+    fn geonames_test() {
+
+        // const GEONAMES_FILE_PATH : &str = "/Users/admin/Downloads/Geonames.org/cities500.txt";
+        //GOATGOAT Figure out how to path to our source file
+        const GEONAMES_FILE_PATH : &str = "/Users/admin/rustProjects/fuzzy_rocks/geonames_megacities.txt";        
+
+        //Create the FuzzyRocks Table, and clear out any records that happen to be hanging out
+        let mut table = Table::<i32, 2, 12, true>::new("geonames.rocks").unwrap();
+        table.reset().unwrap();
+
+        //Data structure to parse the GeoNames TSV file into
+        #[derive(Clone, Debug, Serialize, Deserialize)]
+        struct GeoName {
+            geonameid         : i32, //integer id of record in geonames database
+            name              : String, //name of geographical point (utf8) varchar(200)
+            asciiname         : String, //name of geographical point in plain ascii characters, varchar(200)
+            alternatenames    : String, //alternatenames, comma separated, ascii names automatically transliterated, convenience attribute from alternatename table, varchar(10000)
+            latitude          : f32, //latitude in decimal degrees (wgs84)
+            longitude         : f32, //longitude in decimal degrees (wgs84)
+            feature_class     : char, //see http://www.geonames.org/export/codes.html, char(1)
+            feature_code      : String,//[char; 10], //see http://www.geonames.org/export/codes.html, varchar(10)
+            country_code      : String,//[char; 2], //ISO-3166 2-letter country code, 2 characters
+            cc2               : String, //alternate country codes, comma separated, ISO-3166 2-letter country code, 200 characters
+            admin1_code       : String,//[char; 20], //fipscode (subject to change to iso code), see exceptions below, see file admin1Codes.txt for display names of this code; varchar(20)
+            admin2_code       : String, //code for the second administrative division, a county in the US, see file admin2Codes.txt; varchar(80) 
+            admin3_code       : String,//[char; 20], //code for third level administrative division, varchar(20)
+            admin4_code       : String,//[char; 20], //code for fourth level administrative division, varchar(20)
+            population        : i64, //bigint (8 byte int)
+            #[serde(deserialize_with = "default_if_empty")]
+            elevation         : i32, //in meters, integer
+            #[serde(deserialize_with = "default_if_empty")]
+            dem               : i32, //digital elevation model, srtm3 or gtopo30, average elevation of 3''x3'' (ca 90mx90m) or 30''x30'' (ca 900mx900m) area in meters, integer. srtm processed by cgiar/ciat.
+            timezone          : String, //the iana timezone id (see file timeZone.txt) varchar(40)
+            modification_date : String, //date of last modification in yyyy-MM-dd format
+        }
+
+        fn default_if_empty<'de, D, T>(de: D) -> Result<T, D::Error>
+            where D: serde::Deserializer<'de>, T: serde::Deserialize<'de> + Default,
+        {
+            Option::<T>::deserialize(de).map(|x| x.unwrap_or_else(|| T::default()))
+        }
+
+        //Open the tab-saparated value file
+        let tsv_file_contents = fs::read_to_string(GEONAMES_FILE_PATH).expect("Error reading geonames file");
+        let mut tsv_parser = ReaderBuilder::new()
+            .delimiter(b'\t')
+            .has_headers(false)
+            .flexible(true) //We want to permit situations where some rows have fewer columns for now
+            .quote(0)
+            .double_quote(false)
+            .from_reader(tsv_file_contents.as_bytes());
+
+        //Iterate over every geoname entry in the geonames file and insert it (lowercase) into our table
+        let mut record_id = RecordID::NULL;
+        let mut tsv_record_count = 0;
+        for geoname in tsv_parser.deserialize::<GeoName>().map(|result| result.unwrap()) {
+            record_id = table.insert(&geoname.name.to_lowercase(), &geoname.geonameid).unwrap();
+            tsv_record_count += 1;
+
+            //Status Print
+            if record_id.0 % 500 == 499 {
+                println!("inserting... {}, {}", geoname.name.to_lowercase(), record_id.0);
+            }
+        }
+
+        //Indirectly that the number of records roughly matches the number of entries from the CSV
+        //NOTE: RocksDB doesn't have a "record_count" feature, and therefore neither does our Table,
+        //but since we started from a reset table, we can ensure that the last assigned record_id
+        //should roughly correspond to the number of entries we inserted
+        assert_eq!(record_id.0+1, tsv_record_count);
+
+        //Confirm we can find a known city (London)
+        let london_results : Vec<(String, i32)> = table.lookup_exact("london").unwrap().map(|record_id| table.get_with_record_id(record_id).unwrap()).collect();
+        assert!(london_results.contains(&("london".to_string(), 2643743)));
+
+        //Close RocksDB connection by dropping the table object
+        drop(table);
+        drop(london_results);
+
+        //Reopen the table and confirm that "London" is still there
+        let table = Table::<i32, 2, 12, true>::new("geonames.rocks").unwrap();
+        let london_results : Vec<(String, i32)> = table.lookup_exact("london").unwrap().map(|record_id| table.get_with_record_id(record_id).unwrap()).collect();
+        assert!(london_results.contains(&("london".to_string(), 2643743)));
+    }
 
     #[test]
     fn fuzzy_rocks_test() {
-
-        //GOATGOAT, Replace the sqlite calls here with just using csv-parsing of the geonames files,
-        //so this test can be more portable.
 
         //Also, I want to test the each of the entry points, along with a test for:
         //Resetting databaase
@@ -726,12 +836,12 @@ mod tests {
         //Exact Lookup where there is an exact match up to "meaningful length", but not an exact match
         //Deleting a record
 
-        //Open the SQLite connection and set up the query
-        let connection = sqlite::open("data_store.sqlite").unwrap();
-        let mut query = connection
-            .prepare("SELECT * FROM geonames WHERE population > ?")
-            .unwrap();
-        query.bind(1, 5000).unwrap();
+        // //Open the SQLite connection and set up the query
+        // let connection = sqlite::open("data_store.sqlite").unwrap();
+        // let mut query = connection
+        //     .prepare("SELECT * FROM geonames WHERE population > ?")
+        //     .unwrap();
+        // query.bind(1, 5000000).unwrap();
 
         //GOATGOATGOAT WTF!!!  Why does this do this???
         // for i in 0..10 {
@@ -742,17 +852,35 @@ mod tests {
         // }
 
         //Create the FuzzyRocks Table
-        let mut table = Table::<i64, 2, 12, true>::new("goat.rocks").unwrap();
+        let table = Table::<i64, 2, 12, true>::new("goat.rocks").unwrap();
 
         // //Commented out because we only need to build the database once
         // //Iterate over all of the rows returned by the sqlite query, and load them into Rocks
         // while let State::Row = query.next().unwrap() {
 
-        //     let geonameid = query.read::<i64>(0).unwrap();
-        //     let name = query.read::<String>(1).unwrap();
-        //     let _population = query.read::<i64>(14).unwrap();
+        //     let f0 = query.read::<String>(0).unwrap();
+        //     let f1 = query.read::<String>(1).unwrap();
+        //     let f2 = query.read::<String>(2).unwrap();
+        //     let f3 = query.read::<String>(3).unwrap();
+        //     let f4 = query.read::<String>(4).unwrap();
+        //     let f5 = query.read::<String>(5).unwrap();
+        //     let f6 = query.read::<String>(6).unwrap();
+        //     let f7 = query.read::<String>(7).unwrap();
+        //     let f8 = query.read::<String>(8).unwrap();
+        //     let f9 = query.read::<String>(9).unwrap();
+        //     let f10 = query.read::<String>(10).unwrap();
+        //     let f11 = query.read::<String>(11).unwrap();
+        //     let f12 = query.read::<String>(12).unwrap();
+        //     let f13 = query.read::<String>(13).unwrap();
+        //     let f14 = query.read::<String>(14).unwrap();
+        //     let f15 = query.read::<String>(15).unwrap();
+        //     let f16 = query.read::<String>(16).unwrap();
+        //     let f17 = query.read::<String>(17).unwrap();
+        //     let f18 = query.read::<String>(18).unwrap();
 
-        //     let _record_id = table.insert(&name, &geonameid).unwrap();
+        //     println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18);
+
+        //     // let _record_id = table.insert(&name, &geonameid).unwrap();
         // }
 
 

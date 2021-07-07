@@ -13,4 +13,4 @@ serde = { version = "*", features = ["derive"] }
 bincode = "*"
 
 [dev-dependencies]
-sqlite = "*"
+csv = "*"
