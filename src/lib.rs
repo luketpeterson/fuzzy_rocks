@@ -5,23 +5,11 @@
 /// Talk about how lookup keys are not unique, and how only a RecordID is guarenteed to be unique.
 ///
 
-//Optional score structure so deletes, inserts, transposes, and substitutions can be weighted differently
-// Beter idea: this is implicit in the distance function that's provided for fuzzy lookups
-
-// lookup function will:
-//1. decompose search key into all delete-based permutations
-//2. Iterate over all permutations and perform lookup into the RocksDB
-//3. If there is a value, iterate over all of the original keys represented, and add each one to a candidate hash
-//      The candidate hash is an optimization because there will likely be many variants in common betweek a given lookup key and a given stored record key
-//4. See if the original key qualifies under the distance function and threshold distance criteria, and filter it out if it doesn't
-//
-
-//GOATGOAT Next work:
-// Create lookup_fuzzy that takes a distance function and a max_distance, and returns a RecordID iterator
-// Create a get_fuzzy that takes a distance function, and returns the best match T, and its distance
+//GOATGOATGOAT
 // Create a remove function that takes a RecordID, and deletes the record at that RecordID.  Replaces the record with a dead sentinel, and scrubs references to it out of the variants table
 
 use core::marker::PhantomData;
+use core::cmp::min;
 
 use serde::{Serialize, Deserialize};
 use bincode::Options;
@@ -67,8 +55,9 @@ pub struct Table<T : Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_D
     phantom: PhantomData<T>,
 }
 
-/// The largest key length considered by the algorithm.  Any additional bytes of the key will be ignored
-pub const MAX_KEY_LENGTH : usize = 64;
+//GOATGOAT Junk
+// /// The largest key length considered by the algorithm.  Any additional bytes of the key will be ignored
+// pub const MAX_KEY_LENGTH : usize = 64;
 
 //NOTE: We have two flavors of the Record struct so we don't need to make an extra copy of the data when
 //serializing, but I'm not sure how to avoid the copy when deserializing
@@ -201,10 +190,25 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
         Ok(result_set.into_iter())
     }
 
-    fn lookup_fuzzy_internal<'a>(&'a self, raw_key : &'a [u8]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
-        //GOATGOAT, TODO: apply a distance function and a threshold, and then filter the results based on them
-        //Make part of this implementation shared, so that the version that returns the value can reuse most of it
+    fn lookup_fuzzy_raw_internal<'a>(&'a self, raw_key : &'a [u8]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
         self.fuzzy_candidates_iter(raw_key)
+    }
+
+    fn lookup_fuzzy_internal<'a, D : 'static + Copy + PartialOrd, F : 'a + Fn(&[u8], &[u8])->D>(&'a self, raw_key : &'a [u8], distance_function : F, threshold : D) -> Result<impl Iterator<Item=(RecordID, D)> + 'a, String> {
+        self.fuzzy_candidates_iter(raw_key).map(move |candidate_iter|
+            candidate_iter.filter_map(move |record_id| {
+
+                //Check the record's key with the distance function
+                let (record_key, _val) = self.get_with_record_id_internal(record_id).unwrap();
+                let distance = distance_function(&record_key, raw_key);
+
+                if distance <= threshold{
+                    Some((record_id, distance))
+                } else {
+                    None
+                }
+            })
+        )
     }
 
     /// Checks the table for records with keys that precisely match the key supplied
@@ -390,6 +394,18 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
         }
     }
 
+    // Returns the unicode character at the idx, counting through each character in the string
+    // The "UNICODE_KEYS" path relies on the buffer being valid unicode
+    // Will panic if idx is greater than the number of characters in the parsed string
+    fn unicode_char_at_index(s: &[u8], idx : usize) -> char {
+        if UNICODE_KEYS {
+            let the_str = unsafe{std::str::from_utf8_unchecked(s)};
+            the_str.chars().nth(idx).unwrap()
+        } else {
+            s[idx] as char
+        }
+    }
+
     // Removes a single unicode character at the specified index from a utf-8 string stored in a slice of bytes
     // The "UNICODE_KEYS" path relies on the buffer being valid unicode
     fn unicode_remove(s: &[u8], index: usize) -> Vec<u8> {
@@ -425,7 +441,48 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
         }
     }
 
+    /// An implementation of the basic Levenstein distance function, which may be passed to [lookup_fuzzy]
+    /// 
+    /// This implementation uses the Wagner-Fischer Algorithm, as it's described here:
+    /// https://en.wikipedia.org/wiki/Levenshtein_distance
+    pub fn edit_distance(key_a : &[u8], key_b : &[u8]) -> u64 {
 
+        let m = Self::unicode_len(key_a)+1;
+        let n = Self::unicode_len(key_b)+1;
+
+        //Allocate a 2-dimensional vec for the distances between the first i characters of key_a
+        //and the first j characters of key_b
+        let mut d = vec![vec![0; n]; m];
+
+        for i in 1..m {
+            d[i][0] = i;
+        }
+
+        for j in 1..n {
+            d[0][j] = j;
+        }
+
+        for j in 1..n {
+            for i in 1..m {
+
+                let substitution_cost = if Self::unicode_char_at_index(key_a, i-1) == Self::unicode_char_at_index(key_b, j-1) {
+                    0
+                } else {
+                    1
+                };
+
+                let deletion_distance = d[i-1][j] + 1;
+                let insertion_distance = d[i][j-1] + 1;
+                let substitution_distance = d[i-1][j-1] + substitution_cost;
+
+                let smallest_distance = min(min(deletion_distance, insertion_distance), substitution_distance);
+                
+                d[i][j] = smallest_distance;  
+            }
+        }
+
+        d[m-1][n-1] as u64
+    }
 }
 
 impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DISTANCE : usize, const MEANINGFUL_KEY_LEN : usize>Table<T, MAX_SEARCH_DISTANCE, MEANINGFUL_KEY_LEN, true> {
@@ -455,8 +512,18 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
         self.lookup_exact_internal(key.as_bytes())
     }
 
-    pub fn lookup_fuzzy<'a>(&'a self, key : &'a str) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
-        self.lookup_fuzzy_internal(key.as_bytes())
+    /// Locates all records in the table with a key that is within a deletion distance of MAX_SEARCH_DISTANCE of
+    /// the key supplied, based on the SymSpell algorithm.
+    /// 
+    /// This function underlies all fuzzy lookups, and does no further filtering based on any distance function.
+    pub fn lookup_fuzzy_raw<'a>(&'a self, key : &'a str) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
+        self.lookup_fuzzy_raw_internal(key.as_bytes())
+    }
+
+    /// Locates all records in the table for which the supplied `distance_function` evaluates to a result smaller
+    /// than the supplied `threshold` when comparing the record's key with the supplied `key`
+    pub fn lookup_fuzzy<'a, D : 'static + Copy + PartialOrd, F : 'a + Fn(&[u8], &[u8])->D>(&'a self, key : &'a str, distance_function : F, threshold : D) -> Result<impl Iterator<Item=(RecordID, D)> + 'a, String> {
+        self.lookup_fuzzy_internal(key.as_bytes(), distance_function, threshold)
     }
 
 }
@@ -699,9 +766,9 @@ mod tests {
         // drop(variants_cf_handle);
 
         //for record in table.lookup_fuzzy("salt Bake City").unwrap() {
-        for record in table.lookup_fuzzy("havre").unwrap() {
+        for (record, distance) in table.lookup_fuzzy("havre", Table::<i64, 2, 12, true>::edit_distance, 1).unwrap() {
             let (key, val) = table.get_with_record_id(record).unwrap();
-            println!("result_id = {}, key = {}, val = {}", record, key, val);
+            println!("result_id = {}, key = {}, val = {}, dist = {}", record, key, val, distance);
         }
 
     }
