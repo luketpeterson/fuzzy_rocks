@@ -213,7 +213,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
         self.fuzzy_candidates_iter(raw_key)
     }
 
-    fn lookup_fuzzy_internal<'a, D : 'static + Copy + PartialOrd, F : 'a + Fn(&[u8], &[u8])->D>(&'a self, raw_key : &'a [u8], distance_function : F, threshold : D) -> Result<impl Iterator<Item=(RecordID, D)> + 'a, String> {
+    fn lookup_fuzzy_internal<'a, D : 'static + Copy + PartialOrd, F : 'a + Fn(&[u8], &[u8])->D>(&'a self, raw_key : &'a [u8], distance_function : F, threshold : Option<D>) -> Result<impl Iterator<Item=(RecordID, D)> + 'a, String> {
         self.fuzzy_candidates_iter(raw_key).map(move |candidate_iter|
             candidate_iter.filter_map(move |record_id| {
 
@@ -221,13 +221,35 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
                 let (record_key, _val) = self.get_with_record_id_internal(record_id).unwrap();
                 let distance = distance_function(&record_key, raw_key);
 
-                if distance <= threshold{
-                    Some((record_id, distance))
-                } else {
-                    None
+                match threshold {
+                    Some(threshold) => {
+                        if distance <= threshold{
+                            Some((record_id, distance))
+                        } else {
+                            None
+                        }        
+                    }
+                    None => Some((record_id, distance))
                 }
             })
         )
+    }
+
+    fn lookup_best_internal<D : 'static + Copy + PartialOrd, F : Fn(&[u8], &[u8])->D>(&self, raw_key : &[u8], distance_function : F) -> Result<RecordID, String> {
+        let mut result_iter = self.lookup_fuzzy_internal(raw_key, distance_function, None)?;
+        
+        if let Some(first_result) = result_iter.next() {
+            let mut best_result = first_result;
+            for result in result_iter {
+                if result.1 < best_result.1 {
+                    best_result = result;
+                }
+            }
+
+            return Ok(best_result.0);
+        }
+
+        Err("No Matching Record Found".to_string())
     }
 
     /// Checks the table for records with keys that precisely match the key supplied
@@ -506,7 +528,15 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
 
 impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DISTANCE : usize, const MEANINGFUL_KEY_LEN : usize>Table<T, MAX_SEARCH_DISTANCE, MEANINGFUL_KEY_LEN, true> {
 
-    /// Inserts a new key-value pair into the table
+    /// Inserts a new key-value pair into the table and returns the RecordID of the new record.
+    /// 
+    /// This function will always create a new record, regardless of whether an identical key exists.
+    /// It is permissible to have two distinct records with identical keys.
+    /// 
+    /// NOTE: This function takes an &T for value rather than an owned T because it must make an
+    /// internal copy regardless of passed ownership, so requiring an owned object would ofter
+    /// result in a redundant copy.  However this is different from most containers, and makes things
+    /// feel awkward when using [String] types for values.
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
@@ -535,14 +565,34 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
     /// the key supplied, based on the SymSpell algorithm.
     /// 
     /// This function underlies all fuzzy lookups, and does no further filtering based on any distance function.
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
     pub fn lookup_fuzzy_raw<'a>(&'a self, key : &'a str) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
         self.lookup_fuzzy_raw_internal(key.as_bytes())
     }
 
     /// Locates all records in the table for which the supplied `distance_function` evaluates to a result smaller
     /// than the supplied `threshold` when comparing the record's key with the supplied `key`
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
     pub fn lookup_fuzzy<'a, D : 'static + Copy + PartialOrd, F : 'a + Fn(&[u8], &[u8])->D>(&'a self, key : &'a str, distance_function : F, threshold : D) -> Result<impl Iterator<Item=(RecordID, D)> + 'a, String> {
-        self.lookup_fuzzy_internal(key.as_bytes(), distance_function, threshold)
+        self.lookup_fuzzy_internal(key.as_bytes(), distance_function, Some(threshold))
+    }
+
+    /// Locates the record in the table for which the supplied `distance_function` evaluates to the lowest value
+    /// when comparing the record's key with the supplied `key`.
+    /// 
+    /// If no matching record is found within the table's `MAX_SEARCH_DISTANCE`, this method will return an error.
+    /// 
+    /// NOTE: If two or more results have the same returned distance value and that is the smallest value, the
+    /// implementation does not specify which result will be returned.
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn lookup_best<D : 'static + Copy + PartialOrd, F : Fn(&[u8], &[u8])->D>(&self, key : &str, distance_function : F) -> Result<RecordID, String> {
+        self.lookup_best_internal(key.as_bytes(), distance_function)
     }
 
 }
@@ -728,22 +778,24 @@ fn bincode_string_varint(buf : &[u8]) -> &[u8] {
 mod tests {
     use crate::{*};
     use std::fs;
+    use std::path::PathBuf;
     use csv::ReaderBuilder;
-    use serde::{Deserialize};    
+    use serde::{Deserialize};
 
     #[test]
     /// This test is designed to stress the database with many thousand entries.
     ///  
-    /// You may download an alternate GeoNames file in order to get a more rigorous test.
+    /// You may download an alternate GeoNames file in order to get a more rigorous test.  The included
+    /// geonames_megacities.txt file is just a stub to avoid bloating the crate download.
+    /// 
     /// A geonames file may be downloaded from: http://download.geonames.org/export/dump/cities15000.zip
     /// for the smallest file, and "cities500.zip" for the largest, depending on whether you want this
     /// to pass in the a lightweight way or the most thorough.
     fn geonames_test() {
 
-        // const GEONAMES_FILE_PATH : &str = "/Users/admin/Downloads/Geonames.org/cities500.txt";
-        //GOATGOAT Figure out how to path to our source file
-        const GEONAMES_FILE_PATH : &str = "/Users/admin/rustProjects/fuzzy_rocks/geonames_megacities.txt";        
-
+        let mut geonames_file_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        geonames_file_path.push("geonames_megacities.txt");
+    
         //Create the FuzzyRocks Table, and clear out any records that happen to be hanging out
         let mut table = Table::<i32, 2, 12, true>::new("geonames.rocks").unwrap();
         table.reset().unwrap();
@@ -781,7 +833,7 @@ mod tests {
         }
 
         //Open the tab-saparated value file
-        let tsv_file_contents = fs::read_to_string(GEONAMES_FILE_PATH).expect("Error reading geonames file");
+        let tsv_file_contents = fs::read_to_string(geonames_file_path).expect("Error reading geonames file");
         let mut tsv_parser = ReaderBuilder::new()
             .delimiter(b'\t')
             .has_headers(false)
@@ -807,7 +859,7 @@ mod tests {
         //NOTE: RocksDB doesn't have a "record_count" feature, and therefore neither does our Table,
         //but since we started from a reset table, we can ensure that the last assigned record_id
         //should roughly correspond to the number of entries we inserted
-        assert_eq!(record_id.0+1, tsv_record_count);
+        assert_eq!(record_id.0 + 1, tsv_record_count);
 
         //Confirm we can find a known city (London)
         let london_results : Vec<(String, i32)> = table.lookup_exact("london").unwrap().map(|record_id| table.get_with_record_id(record_id).unwrap()).collect();
@@ -826,78 +878,73 @@ mod tests {
     #[test]
     fn fuzzy_rocks_test() {
 
-        //Also, I want to test the each of the entry points, along with a test for:
-        //Resetting databaase
-        //Fuzzy lookup with excellent match
-        //Fuzzy lookup with okay match
-        //Fuzzy lookup with no match inside threshold
-        //Exact Lookup
-        //Exact Lookup where nothing is found
-        //Exact Lookup where there is an exact match up to "meaningful length", but not an exact match
-        //Deleting a record
+        //Create and reset the FuzzyRocks Table
+        let mut table = Table::<String, 2, 8, true>::new("test.rocks").unwrap();
+        table.reset().unwrap();
 
-        // //Open the SQLite connection and set up the query
-        // let connection = sqlite::open("data_store.sqlite").unwrap();
-        // let mut query = connection
-        //     .prepare("SELECT * FROM geonames WHERE population > ?")
-        //     .unwrap();
-        // query.bind(1, 5000000).unwrap();
+        //Insert some records
+        let sun = table.insert("Sunday", &"Nichi".to_string()).unwrap();
+        let _sat = table.insert("Saturday", &"Dou".to_string()).unwrap();
+        let _fri = table.insert("Friday", &"Kin".to_string()).unwrap();
+        let _thu = table.insert("Thursday", &"Moku".to_string()).unwrap();
+        let _wed = table.insert("Wednesday", &"Sui".to_string()).unwrap();
+        let _tue = table.insert("Tuesday", &"Ka".to_string()).unwrap();
+        let mon = table.insert("Monday", &"Getsu".to_string()).unwrap();
 
-        //GOATGOATGOAT WTF!!!  Why does this do this???
-        // for i in 0..10 {
-        //     //Create the FuzzyRocks Table
-        //     let mut table = Table::<i64, 3, 12, true>::new("goat.rocks").unwrap();
-        //     table.db.flush();
-        //     drop(table);
-        // }
+        //Test lookup_exact
+        let results : Vec<(String, String)> = table.lookup_exact("Friday").unwrap().map(|record_id| table.get_with_record_id(record_id).unwrap()).collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "Friday");
+        assert_eq!(results[0].1, "Kin");
 
-        //Create the FuzzyRocks Table
-        let table = Table::<i64, 2, 12, true>::new("goat.rocks").unwrap();
+        //Test lookup_exact, with a query that should provide no results
+        let results : Vec<(String, String)> = table.lookup_exact("friday").unwrap().map(|record_id| table.get_with_record_id(record_id).unwrap()).collect();
+        assert_eq!(results.len(), 0);
 
-        // //Commented out because we only need to build the database once
-        // //Iterate over all of the rows returned by the sqlite query, and load them into Rocks
-        // while let State::Row = query.next().unwrap() {
+        //Test lookup_best, using the supplied edit_distance function
+        let result = table.lookup_best("Bonday", Table::<String, 2, 8, true>::edit_distance).unwrap();
+        assert_eq!(result, mon);
 
-        //     let f0 = query.read::<String>(0).unwrap();
-        //     let f1 = query.read::<String>(1).unwrap();
-        //     let f2 = query.read::<String>(2).unwrap();
-        //     let f3 = query.read::<String>(3).unwrap();
-        //     let f4 = query.read::<String>(4).unwrap();
-        //     let f5 = query.read::<String>(5).unwrap();
-        //     let f6 = query.read::<String>(6).unwrap();
-        //     let f7 = query.read::<String>(7).unwrap();
-        //     let f8 = query.read::<String>(8).unwrap();
-        //     let f9 = query.read::<String>(9).unwrap();
-        //     let f10 = query.read::<String>(10).unwrap();
-        //     let f11 = query.read::<String>(11).unwrap();
-        //     let f12 = query.read::<String>(12).unwrap();
-        //     let f13 = query.read::<String>(13).unwrap();
-        //     let f14 = query.read::<String>(14).unwrap();
-        //     let f15 = query.read::<String>(15).unwrap();
-        //     let f16 = query.read::<String>(16).unwrap();
-        //     let f17 = query.read::<String>(17).unwrap();
-        //     let f18 = query.read::<String>(18).unwrap();
+        //Test lookup_best, when there is no acceptable match
+        let result = table.lookup_best("Rahu", Table::<String, 2, 8, true>::edit_distance);
+        assert!(result.is_err());
 
-        //     println!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18);
+        //Test lookup_fuzzy with a perfect match, using the supplied edit_distance function
+        //In this case, we should only get one match within edit-distance 2
+        let results : Vec<(String, String, u64)> = table.lookup_fuzzy("Saturday", Table::<String, 2, 8, true>::edit_distance, 2)
+            .unwrap().map(|(record_id, distance)| {
+                let (key, val) = table.get_with_record_id(record_id).unwrap();
+                (key, val, distance)
+            }).collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "Saturday");
+        assert_eq!(results[0].1, "Dou");
+        assert_eq!(results[0].2, 0);
 
-        //     // let _record_id = table.insert(&name, &geonameid).unwrap();
-        // }
+        //Test lookup_fuzzy with a perfect match, but where we'll hit another imperfect match as well
+        let results : Vec<(String, String, u64)> = table.lookup_fuzzy("Tuesday", Table::<String, 2, 8, true>::edit_distance, 2)
+            .unwrap().map(|(record_id, distance)| {
+                let (key, val) = table.get_with_record_id(record_id).unwrap();
+                (key, val, distance)
+            }).collect();
+        assert_eq!(results.len(), 2);
+        assert!(results.contains(&("Tuesday".to_string(), "Ka".to_string(), 0)));
+        assert!(results.contains(&("Thursday".to_string(), "Moku".to_string(), 2)));
+
+        //Test lookup_fuzzy where we should get no match
+        let results : Vec<(RecordID, u64)> = table.lookup_fuzzy("Rahu", Table::<String, 2, 8, true>::edit_distance, 2).unwrap().collect();
+        assert_eq!(results.len(), 0);
+
+        //Test lookup_fuzzy_raw, to get all of the SymSpell Delete variants
+        //We're testing the fact that characters beyond MEANINGFUL_KEY_LEN aren't used for the comparison
+        let results : Vec<RecordID> = table.lookup_fuzzy_raw("Sunday. That's my fun day.").unwrap().collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], sun);
 
 
-        // //How bad is it??  How many entries do we have in really common variants, like single characters?
-        // //ANSWER: anywhere from 50 to 1000, out of 50,000 records in the table (all cities pop > 5000),
-        // // a MAX_SEARCH_DISTANCE = 3, and a MEANINGFUL_KEY_LEN = 12
-        // let variants_cf_handle = table.db.cf_handle(VARIANTS_CF_NAME).unwrap();
-        // if let Some(variant_vec_bytes) = table.db.get_pinned_cf(variants_cf_handle, b"o").unwrap() {
-        //     println!("len = {}", bincode_vec_fixint_len(&variant_vec_bytes));
-        // }
-        // drop(variants_cf_handle);
+        //GOATGOATGOAT
+        //Deleting a record, and test that it's gone
 
-        //for record in table.lookup_fuzzy("salt Bake City").unwrap() {
-        for (record, distance) in table.lookup_fuzzy("havre", Table::<i64, 2, 12, true>::edit_distance, 1).unwrap() {
-            let (key, val) = table.get_with_record_id(record).unwrap();
-            println!("result_id = {}, key = {}, val = {}, dist = {}", record, key, val, distance);
-        }
 
     }
 }
