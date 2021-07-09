@@ -9,6 +9,8 @@
 //! 
 //! GOATGOATGOAT, Add usage example
 //! 
+//! GOATGOATGOAT, Write about different distance functions, give examples.  OCR errors, phonetic errors, 
+//! 
 //! **NOTE**: If your use-case can cope with a higher startup latency and you are ok with all of your keys and
 //! variants being resident in memory, then query performance will certainly be better using a solution
 //! built on Rust's native collections, such as this [symspell](https://crates.io/crates/symspell)
@@ -130,8 +132,8 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
         let record_count = probe_for_max_sequential_key(&db, records_cf_handle, 255)?;
 
         Ok(Self {
-            record_count : record_count,
-            db : db,
+            record_count,
+            db,
             path : path.to_string(),
             phantom : PhantomData
         })
@@ -165,11 +167,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
     /// 
     /// Use this function instead of comparing a [RecordID] to [RecordID::NULL].
     pub fn record_id_is_valid(&self, record_id : RecordID) -> bool {
-        if record_id.0 < self.record_count {
-            true
-        } else {
-            false
-        }
+        record_id.0 < self.record_count
     }
 
     /// Deletes a record from the Table.
@@ -294,7 +292,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
         self.put_record_internal(new_record_id, raw_key, value)?;
 
         //Now compute all the variants so we'll be able to add an entry to each one
-        let variants = Self::variants(&raw_key);
+        let variants = Self::variants(raw_key);
 
         //Add the new_record_id to each variant
         let variants_cf_handle = self.db.cf_handle(VARIANTS_CF_NAME).unwrap();
@@ -312,7 +310,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
     fn fuzzy_candidates_iter<'a>(&'a self, raw_key : &'a [u8]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
 
         //Create all of the potential variants based off of the "meaningful" part of the key
-        let variants = Self::variants(&raw_key);
+        let variants = Self::variants(raw_key);
 
         //Create a new HashSet to hold all of the RecordIDs that we find
         let mut result_set = HashSet::new(); //TODO, may want to allocate this with a non-zero capacity
@@ -411,6 +409,10 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
 
             //I guess it's simpler (and more efficeint) to assemble the results in a vec than to try
             // and keep the iterator machinations alive outside this function
+            //
+            //NOTE: Clippy complains about this, but Clippy doesn't seem to understand that this iterator
+            //can't live outside of this function
+            #[allow(clippy::needless_collect)] 
             let record_ids : Vec<RecordID> = record_id_iter.collect();
 
             Ok(record_ids.into_iter())
@@ -469,8 +471,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
     fn new_variant_vec(record_id : RecordID) -> Vec<u8> {
 
         //Create a new vec and Serialize it out
-        let mut new_vec = Vec::with_capacity(1);
-        new_vec.push(record_id);
+        let new_vec = vec![record_id];
         let vec_coder = bincode::DefaultOptions::new().with_fixint_encoding().with_little_endian();
         vec_coder.serialize(&new_vec).unwrap()
     }
@@ -489,7 +490,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
 
         //Deserialize the existing database entry into a vec of RecordIDs
         let mut variant_vec = if let Some(existing_bytes) = existing_val {
-            let new_vec : Vec<RecordID> = vec_coder.deserialize(&existing_bytes).unwrap();
+            let new_vec : Vec<RecordID> = vec_coder.deserialize(existing_bytes).unwrap();
             new_vec
         } else {
 
@@ -624,8 +625,12 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
         //and the first j characters of key_b
         let mut d = vec![vec![0; n]; m];
 
-        for i in 1..m {
-            d[i][0] = i;
+        //NOTE: I personally find this (below) more readable, but clippy really like the other style.  -\_(..)_/-
+        // for i in 1..m {
+        //     d[i][0] = i;
+        // }
+        for (i, row) in d.iter_mut().enumerate().skip(1) {
+            row[0] = i;
         }
 
         for j in 1..n {
@@ -764,12 +769,10 @@ fn probe_for_max_sequential_key(db : &DBWithThreadMode<rocksdb::SingleThreaded>,
     debug_assert!(::std::mem::size_of::<usize>() == 8);
     let mut guess_max = if starting_hint > 0xFFFFFFFF {
         usize::MAX
+    } else if starting_hint < 1 {
+        1
     } else {
-        if starting_hint < 1 {
-            1
-        } else {
-            starting_hint * starting_hint
-        }
+        starting_hint * starting_hint
     };
     
     let mut cur_val = starting_hint;
@@ -785,7 +788,7 @@ fn probe_for_max_sequential_key(db : &DBWithThreadMode<rocksdb::SingleThreaded>,
             //println!("Yes, cur_val = {}, min = {}, max = {}, guess_max = {}", cur_val, min, max, guess_max);
             min = cur_val + 1;
             if guess_max < max/2 {
-                guess_max = guess_max * 2;
+                guess_max *= 2;
             } else {
                 guess_max = max;
             }
@@ -830,7 +833,7 @@ fn bincode_vec_fixint_len(buf : &[u8]) -> usize {
 
 /// Returns a [BinCodeVecIterator] to iterate over a Vec<T> that has been encoded with bincode,
 /// without requiring an actual [Vec] to be recreated in memory
-fn bincode_vec_iter<'a, T : Sized + Copy>(buf : &'a [u8]) -> BinCodeVecIterator<'a, T> {
+fn bincode_vec_iter<T : Sized + Copy>(buf : &[u8]) -> BinCodeVecIterator<'_, T> {
 
     //Skip over the length at the beginning (8 bytes = 64bit usize), because we can infer
     // the Vec length from the buffer size
