@@ -1,14 +1,28 @@
 
-/// A persistent key-value store backed by RocksDB with fuzzy lookup using an arbitrary distance function that is accelerated by the SymSpell algorithm.
-///
-/// TODO: Say a bit about the proper use cases.  e.g. a persistent database, optimized to load quickly and not require too much resident memory.  As opposed to quick lookups
-/// Talk about how lookup keys are not unique, and how only a RecordID is guarenteed to be unique.
-///
-/// GOATGOAT certainly faster to use something implemented in straight rust, like the SymSpell crate
-/// The advantages of this crate are:
-/// - lower memory footprint
-/// - faster startup time
-/// 
+//! # fuzzy_rocks Overview
+//! 
+//! A persistent key-value store backed by [RocksDB](https://rocksdb.org) with fuzzy lookup using an
+//! arbitrary distance function and accelerated by the [SymSpell](https://github.com/wolfgarbe/SymSpell) algorithm.
+//!
+//! This crate is designed for large databases where startup time and resident memory footprint are significant
+//! considerations.  This create has been tested with 250,000 unique keys and about 10 million variants.
+//! 
+//! GOATGOATGOAT, Add usage example
+//! 
+//! **NOTE**: If your use-case can cope with a higher startup latency and you are ok with all of your keys and
+//! variants being resident in memory, then query performance will certainly be better using a solution
+//! built on Rust's native collections, such as this [symspell](https://crates.io/crates/symspell)
+//! crate on [crates.io](http://crates.io).
+//! 
+//! This crate manages records, each of which has a unique [RecordID].  Keys are used to perform fuzzy
+//! lookups but keys are not guaranteed to be unique. [Insert](Table::insert)ing the same key into a [Table] twice
+//! will result in two distinct records.
+//! 
+//! The included `geonames_megacities.txt` file is a stub for the `geonames_test`, designed to stress-test
+//! this crate.  The abriged file is included so the test will pass regardless, and to avoid bloating the
+//! download.  The content of `geonames_megacities.txt` was derived from data on [geonames.org](http://geonames.org),
+//! and licensed under a [Creative Commons Attribution 4.0 License](https://creativecommons.org/licenses/by/4.0/legalcode)
+//! 
 
 use core::marker::PhantomData;
 use core::cmp::min;
@@ -21,7 +35,7 @@ use std::convert::TryInto;
 
 use rocksdb::{DB, DBWithThreadMode, ColumnFamily, ColumnFamilyDescriptor, MergeOperands};
 
-///
+/// A collection containing records that may be searched by `key`
 /// 
 /// -`MAX_SEARCH_DISTANCE` is the number of deletes to store in the database for variants created
 /// by the SymSpell optimization.  If `MAX_SEARCH_DISTANCE` is too small, the variant will not be found
@@ -72,6 +86,7 @@ struct RecordDeser<T : serde::de::DeserializeOwned, const UNICODE_KEYS : bool> {
     value : Option<T>
 }
 
+/// A unique identifier for a record within a [Table]
 #[derive(Copy, Debug, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, derive_more::Display, Serialize, Deserialize)]
 pub struct RecordID(usize);
 impl RecordID {
@@ -160,7 +175,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
     /// Deletes a record from the Table.
     /// 
     /// A deleted record cannot be accessed or otherwise found, but the RecordID may be reassigned
-    /// using [replace].
+    /// using [Table::replace].
     pub fn delete(&mut self, record_id : RecordID) -> Result<T, String> {
 
         //Get the key for the record we're removing, so we can compute all the variants
@@ -407,7 +422,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
         }
     }
 
-    /// Returns the value at a specified record.  This function will be faster than doing a fuzzy lookup
+    /// Returns the value associated with the specified record
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
@@ -597,10 +612,9 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
         }
     }
 
-    /// An implementation of the basic Levenstein distance function, which may be passed to [lookup_fuzzy]
+    /// An implementation of the basic Levenstein distance function, which may be passed to [Table::lookup_fuzzy]
     /// 
-    /// This implementation uses the Wagner-Fischer Algorithm, as it's described here:
-    /// https://en.wikipedia.org/wiki/Levenshtein_distance
+    /// This implementation uses the Wagner-Fischer Algorithm, as it's described [here](https://en.wikipedia.org/wiki/Levenshtein_distance)
     pub fn edit_distance(key_a : &[u8], key_b : &[u8]) -> u64 {
 
         let m = Self::unicode_len(key_a)+1;
@@ -643,7 +657,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
 
 impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DISTANCE : usize, const MEANINGFUL_KEY_LEN : usize>Table<T, MAX_SEARCH_DISTANCE, MEANINGFUL_KEY_LEN, true> {
 
-    /// Inserts a new key-value pair into the table and returns the RecordID of the new record.
+    /// Inserts a new key-value pair into the table and returns the RecordID of the new record
     /// 
     /// This function will always create a new record, regardless of whether an identical key exists.
     /// It is permissible to have two distinct records with identical keys.
@@ -659,12 +673,15 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
         self.insert_internal(key.as_bytes(), value, None)
     }
 
-    /// Replaces a record in the Table with the supplied key-value pair.
+    /// Replaces a record in the Table with the supplied key-value pair
     /// 
     /// If the supplied `record_id` references an existing record, the existing record contents will
     /// be deleted.  If the supplied `record_id` references a record that has been deleted, this
     /// function will succeed, but is the `record_id` is invalid then this function will return an
     /// error.
+    /// 
+    /// If the key exactly matches the existing record's key, this function will be more efficient
+    /// as it will not need to update the stored variants.
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
@@ -672,8 +689,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
         self.replace_internal(record_id, key.as_bytes(), value)
     }
 
-    /// Returns the key and value at a specified record.  This function will be faster than doing a
-    /// fuzzy lookup
+    /// Returns the key and value associated with the specified record
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
@@ -913,10 +929,11 @@ mod tests {
     /// This test is designed to stress the database with many thousand entries.
     ///  
     /// You may download an alternate GeoNames file in order to get a more rigorous test.  The included
-    /// geonames_megacities.txt file is just a stub to avoid bloating the crate download.
+    /// `geonames_megacities.txt` file is just a stub to avoid bloating the crate download.  The content
+    /// of `geonames_megacities.txt` was derived from data on [http://geonames.org], and licensed under
+    /// a [Creative Commons Attribution 4.0 License](https://creativecommons.org/licenses/by/4.0/legalcode)
     /// 
-    //GOATGOATGOAT, Make sure geonames gives us a compatible license to include geonames_megacities.txt
-    /// A geonames file may be downloaded from: http://download.geonames.org/export/dump/cities15000.zip
+    /// A geonames file may be downloaded from: [http://download.geonames.org/export/dump/cities15000.zip]
     /// for the smallest file, and "cities500.zip" for the largest, depending on whether you want this
     /// to pass in the a lightweight way or the most thorough.
     fn geonames_test() {
