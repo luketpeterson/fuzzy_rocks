@@ -145,7 +145,22 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
         Ok(())
     }
 
-    /// Deletes a record from the Table.  A deleted record cannot be accessed or otherwise found
+    /// Returns `true` if a [RecordID] **can** be used to refer to a record in a Table, otherwise returns
+    /// `false`.  A deleted record will still have a valid [RecordID].
+    /// 
+    /// Use this function instead of comparing a [RecordID] to [RecordID::NULL].
+    pub fn record_id_is_valid(&self, record_id : RecordID) -> bool {
+        if record_id.0 < self.record_count {
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Deletes a record from the Table.
+    /// 
+    /// A deleted record cannot be accessed or otherwise found, but the RecordID may be reassigned
+    /// using [replace].
     pub fn delete(&mut self, record_id : RecordID) -> Result<T, String> {
 
         //Get the key for the record we're removing, so we can compute all the variants
@@ -194,16 +209,36 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
         Ok(value)
     }
 
+    fn replace_internal(&mut self, record_id : RecordID, raw_key : &[u8], value : &T) -> Result<(), String> {
+        if self.record_id_is_valid(record_id) {
+
+            if self.get_with_record_id_internal(record_id).is_ok() {
+                self.delete(record_id)?;
+            }
+            
+            self.insert_internal(raw_key, value, Some(record_id))?;
+            Ok(())
+        } else {
+            Err("Invalid record_id".to_string())
+        }
+    }
+
     /// Inserts a record into the Table, called by insert(), which is implemented differently depending
     /// on the UNICODE_KEYS constant
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    fn insert_internal(&mut self, raw_key : &[u8], value : &T) -> Result<RecordID, String> {
+    fn insert_internal(&mut self, raw_key : &[u8], value : &T, supplied_id : Option<RecordID>) -> Result<RecordID, String> {
 
-        //We'll be creating a new record, so get the next unique record_id
-        let new_record_id = RecordID(self.record_count);
-        self.record_count += 1;
+        let new_record_id = match supplied_id {
+            None => {
+                //We'll be creating a new record, so get the next unique record_id
+                let new_record_id = RecordID(self.record_count);
+                self.record_count += 1;
+                new_record_id
+            },
+            Some(record_id) => record_id
+        };
 
         //Create the records structure, serialize it, and put in into the records table.
         //If we are updating an old record, we will overwrite it but the key and record_id will stay the same
@@ -594,7 +629,20 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn insert(&mut self, key : &str, value : &T) -> Result<RecordID, String> {
-        self.insert_internal(key.as_bytes(), value)
+        self.insert_internal(key.as_bytes(), value, None)
+    }
+
+    /// Replaces a record in the Table with the supplied key-value pair.
+    /// 
+    /// If the supplied `record_id` references an existing record, the existing record contents will
+    /// be deleted.  If the supplied `record_id` references a record that has been deleted, this
+    /// function will succeed, but is the `record_id` is invalid then this function will return an
+    /// error.
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn replace(&mut self, record_id : RecordID, key : &str, value : &T) -> Result<(), String> {
+        self.replace_internal(record_id, key.as_bytes(), value)
     }
 
     /// Returns the key and value at a specified record.  This function will be faster than doing a
@@ -936,19 +984,19 @@ mod tests {
         table.reset().unwrap();
 
         //Insert some records
-        let sun = table.insert("Sunday", &"Nichi".to_string()).unwrap();
-        let sat = table.insert("Saturday", &"Dou".to_string()).unwrap();
-        let _fri = table.insert("Friday", &"Kin".to_string()).unwrap();
-        let thu = table.insert("Thursday", &"Moku".to_string()).unwrap();
-        let _wed = table.insert("Wednesday", &"Sui".to_string()).unwrap();
-        let tue = table.insert("Tuesday", &"Ka".to_string()).unwrap();
-        let mon = table.insert("Monday", &"Getsu".to_string()).unwrap();
+        let sun = table.insert("Sunday", &"Nichiyoubi".to_string()).unwrap();
+        let sat = table.insert("Saturday", &"Douyoubi".to_string()).unwrap();
+        let _fri = table.insert("Friday", &"Kinyoubi".to_string()).unwrap();
+        let thu = table.insert("Thursday", &"Mokuyoubi".to_string()).unwrap();
+        let wed = table.insert("Wednesday", &"Suiyoubi".to_string()).unwrap();
+        let tue = table.insert("Tuesday", &"Kayoubi".to_string()).unwrap();
+        let mon = table.insert("Monday", &"Getsuyoubi".to_string()).unwrap();
 
         //Test lookup_exact
         let results : Vec<(String, String)> = table.lookup_exact("Friday").unwrap().map(|record_id| table.get_with_record_id(record_id).unwrap()).collect();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "Friday");
-        assert_eq!(results[0].1, "Kin");
+        assert_eq!(results[0].1, "Kinyoubi");
 
         //Test lookup_exact, with a query that should provide no results
         let results : Vec<(String, String)> = table.lookup_exact("friday").unwrap().map(|record_id| table.get_with_record_id(record_id).unwrap()).collect();
@@ -971,7 +1019,7 @@ mod tests {
             }).collect();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "Saturday");
-        assert_eq!(results[0].1, "Dou");
+        assert_eq!(results[0].1, "Douyoubi");
         assert_eq!(results[0].2, 0);
 
         //Test lookup_fuzzy with a perfect match, but where we'll hit another imperfect match as well
@@ -981,8 +1029,8 @@ mod tests {
                 (key, val, distance)
             }).collect();
         assert_eq!(results.len(), 2);
-        assert!(results.contains(&("Tuesday".to_string(), "Ka".to_string(), 0)));
-        assert!(results.contains(&("Thursday".to_string(), "Moku".to_string(), 2)));
+        assert!(results.contains(&("Tuesday".to_string(), "Kayoubi".to_string(), 0)));
+        assert!(results.contains(&("Thursday".to_string(), "Mokuyoubi".to_string(), 2)));
 
         //Test lookup_fuzzy where we should get no match
         let results : Vec<(RecordID, u64)> = table.lookup_fuzzy("Rahu", Table::<String, 2, 8, true>::edit_distance, 2).unwrap().collect();
@@ -1009,13 +1057,32 @@ mod tests {
         let results : Vec<RecordID> = table.lookup_fuzzy_raw("Saturday").unwrap().collect();
         assert_eq!(results.len(), 0);
 
+        //Test replacing a record with another one and ensure the right data is retained
+        table.replace(wed, "Miercoles", &"Zhousan".to_string()).unwrap();
+        let results : Vec<(String, String)> = table.lookup_exact("Miercoles").unwrap().map(|record_id| table.get_with_record_id(record_id).unwrap()).collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "Miercoles");
+        assert_eq!(results[0].1, "Zhousan");
+        let results : Vec<RecordID> = table.lookup_fuzzy_raw("Mercoledi").unwrap().collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], wed);
 
+        //Test replacing a record that we deleted earlier
+        table.replace(sat, "Sabado", &"Zhouliu".to_string()).unwrap();
+        let results : Vec<(String, String)> = table.lookup_exact("Sabado").unwrap().map(|record_id| table.get_with_record_id(record_id).unwrap()).collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "Sabado");
+        assert_eq!(results[0].1, "Zhouliu");
+        let results : Vec<RecordID> = table.lookup_fuzzy_raw("Sabato").unwrap().collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], sat);
+
+        //Attempt to replace an invalid record and confirm we get a reasonable error
+        assert!(table.replace(RecordID::NULL, "Nullday", &"Null".to_string()).is_err());
 
 
         //GOATGOATGOAT
-        //Replace an existing record, where we pass in an existing record and replace both its key and val
-        //Replace a record we have deleted
-        //Attempt to replace an invalid record and confirm we get a reasonable error
+        //add set_value method, which is a cheaper version of replace that doesn't attempt to change the key, just the value
 
 
     }
