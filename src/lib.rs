@@ -4,9 +4,11 @@
 /// TODO: Say a bit about the proper use cases.  e.g. a persistent database, optimized to load quickly and not require too much resident memory.  As opposed to quick lookups
 /// Talk about how lookup keys are not unique, and how only a RecordID is guarenteed to be unique.
 ///
-
-//GOATGOATGOAT
-// Create a remove function that takes a RecordID, and deletes the record at that RecordID.  Replaces the record with a dead sentinel, and scrubs references to it out of the variants table
+/// GOATGOAT certainly faster to use something implemented in straight rust, like the SymSpell crate
+/// The advantages of this crate are:
+/// - lower memory footprint
+/// - faster startup time
+/// 
 
 use core::marker::PhantomData;
 use core::cmp::min;
@@ -55,23 +57,19 @@ pub struct Table<T : Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_D
     phantom: PhantomData<T>,
 }
 
-//GOATGOAT Junk
-// /// The largest key length considered by the algorithm.  Any additional bytes of the key will be ignored
-// pub const MAX_KEY_LENGTH : usize = 64;
-
 //NOTE: We have two flavors of the Record struct so we don't need to make an extra copy of the data when
 //serializing, but I'm not sure how to avoid the copy when deserializing
 #[derive(Serialize)]
 struct RecordSer<'a, T : Serialize, const UNICODE_KEYS : bool> {
     key : &'a [u8],
-    value : &'a T
+    value : Option<&'a T>
 }
 
 #[derive(Deserialize)]
 struct RecordDeser<T : serde::de::DeserializeOwned, const UNICODE_KEYS : bool> {
     key : Box<[u8]>, //NOTE: we could avoid this secondary allocation with a maximum_key_length, but currently we don't have one
     #[serde(bound(deserialize = "T: serde::de::DeserializeOwned"))]
-    value : T
+    value : Option<T>
 }
 
 #[derive(Copy, Debug, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, derive_more::Display, Serialize, Deserialize)]
@@ -147,6 +145,55 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
         Ok(())
     }
 
+    /// Deletes a record from the Table.  A deleted record cannot be accessed or otherwise found
+    pub fn delete(&mut self, record_id : RecordID) -> Result<T, String> {
+
+        //Get the key for the record we're removing, so we can compute all the variants
+        let (raw_key, value) = self.get_with_record_id_internal(record_id)?;
+        let variants = Self::variants(&raw_key);
+
+        //Loop over each variant, and remove the record_id from its associated variant entry in
+        // the database, and remove the variant entry if it only referenced the record we're removing
+        let variants_cf_handle = self.db.cf_handle(VARIANTS_CF_NAME).unwrap();
+        for variant in variants.iter() {
+
+            if let Some(variant_entry_bytes) = self.db.get_pinned_cf(variants_cf_handle, variant)? {
+
+                let variant_entry_len = bincode_vec_fixint_len(&variant_entry_bytes);
+
+                //If the variant entry references more than one record, rebuild it with our record absent
+                if variant_entry_len > 1 {
+                    let mut new_vec : Vec<RecordID> = Vec::with_capacity(variant_entry_len-1);
+                    for record_id_bytes in bincode_vec_iter::<RecordID>(&variant_entry_bytes) {
+                        let other_record_id = RecordID(usize::from_le_bytes(record_id_bytes.try_into().unwrap()));
+                        if other_record_id != record_id {
+                            new_vec.push(other_record_id);
+                        }
+                    }
+                    let vec_coder = bincode::DefaultOptions::new().with_fixint_encoding().with_little_endian();
+                    self.db.put_cf(variants_cf_handle, variant, vec_coder.serialize(&new_vec).unwrap())?;
+                } else {
+                    //Otherwise, remove the variant entry entirely
+                    self.db.delete_cf(variants_cf_handle, variant)?;
+                }
+            }
+        }
+
+        //Now replace the record with an empty sentinel in the records table
+        //NOTE: We replace the record rather than delete it because we assume there are no gaps in the
+        // RecordIDs, when assigning new a RecordID
+        let records_cf_handle = self.db.cf_handle(RECORDS_CF_NAME).unwrap();
+        let empty_record = RecordSer::<T, UNICODE_KEYS>{
+            key : b"",
+            value : None
+        };
+        let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
+        let record_bytes = record_coder.serialize(&empty_record).unwrap();
+        self.db.put_cf(records_cf_handle, usize::to_le_bytes(record_id.0), record_bytes)?;
+
+        Ok(value)
+    }
+
     /// Inserts a record into the Table, called by insert(), which is implemented differently depending
     /// on the UNICODE_KEYS constant
     /// 
@@ -163,13 +210,13 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
         let records_cf_handle = self.db.cf_handle(RECORDS_CF_NAME).unwrap();
         let record = RecordSer::<T, UNICODE_KEYS>{
             key : raw_key,
-            value : value
+            value : Some(value)
         };
         let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
         let record_bytes = record_coder.serialize(&record).unwrap();
         self.db.put_cf(records_cf_handle, usize::to_le_bytes(new_record_id.0), record_bytes)?;
 
-        //Now add the variants to the table if this is the first time we're encountering this key
+        //Now compute all the variants so we'll be able to add an entry to each one
         let variants = Self::variants(&raw_key);
 
         //Add the new_record_id to each variant
@@ -310,7 +357,10 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
             let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
             let record : RecordDeser::<T, UNICODE_KEYS> = record_coder.deserialize(&record_bytes).unwrap();
 
-            Ok(record.value)
+            match record.value {
+                Some(value) => Ok(value),
+                None => Err("Invalid record_id".to_string())
+            }
         } else {
             Err("Invalid record_id".to_string())
         }
@@ -329,7 +379,10 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
             let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
             let record : RecordDeser::<T, UNICODE_KEYS> = record_coder.deserialize(&record_bytes).unwrap();
 
-            Ok((record.key, record.value))
+            match record.value {
+                Some(value) => Ok((record.key, value)),
+                None => Err("Invalid record_id".to_string())
+            }
         } else {
             Err("Invalid record_id".to_string())
         }
@@ -675,15 +728,14 @@ struct BinCodeVecIterator<'a, T : Sized + Copy> {
     phantom: PhantomData<&'a T>,
 }
 
-//Currently unused
-// /// Returns the length of a Vec<T> that has been encoded with bincode, using
-// /// [FixintEncoding](bincode::config::FixintEncoding) and
-// /// [LittleEndian](bincode::config::LittleEndian) byte order.
-// fn bincode_vec_fixint_len(buf : &[u8]) -> usize {
+/// Returns the length of a Vec<T> that has been encoded with bincode, using
+/// [FixintEncoding](bincode::config::FixintEncoding) and
+/// [LittleEndian](bincode::config::LittleEndian) byte order.
+fn bincode_vec_fixint_len(buf : &[u8]) -> usize {
 
-//     let (len_chars, _remainder) = buf.split_at(8);
-//     usize::from_le_bytes(len_chars.try_into().unwrap())
-// }
+    let (len_chars, _remainder) = buf.split_at(8);
+    usize::from_le_bytes(len_chars.try_into().unwrap())
+}
 
 /// Returns a [BinCodeVecIterator] to iterate over a Vec<T> that has been encoded with bincode,
 /// without requiring an actual [Vec] to be recreated in memory
@@ -788,6 +840,7 @@ mod tests {
     /// You may download an alternate GeoNames file in order to get a more rigorous test.  The included
     /// geonames_megacities.txt file is just a stub to avoid bloating the crate download.
     /// 
+    //GOATGOATGOAT, Make sure geonames gives us a compatible license to include geonames_megacities.txt
     /// A geonames file may be downloaded from: http://download.geonames.org/export/dump/cities15000.zip
     /// for the smallest file, and "cities500.zip" for the largest, depending on whether you want this
     /// to pass in the a lightweight way or the most thorough.
@@ -884,11 +937,11 @@ mod tests {
 
         //Insert some records
         let sun = table.insert("Sunday", &"Nichi".to_string()).unwrap();
-        let _sat = table.insert("Saturday", &"Dou".to_string()).unwrap();
+        let sat = table.insert("Saturday", &"Dou".to_string()).unwrap();
         let _fri = table.insert("Friday", &"Kin".to_string()).unwrap();
-        let _thu = table.insert("Thursday", &"Moku".to_string()).unwrap();
+        let thu = table.insert("Thursday", &"Moku".to_string()).unwrap();
         let _wed = table.insert("Wednesday", &"Sui".to_string()).unwrap();
-        let _tue = table.insert("Tuesday", &"Ka".to_string()).unwrap();
+        let tue = table.insert("Tuesday", &"Ka".to_string()).unwrap();
         let mon = table.insert("Monday", &"Getsu".to_string()).unwrap();
 
         //Test lookup_exact
@@ -941,9 +994,28 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], sun);
 
+        //Test deleting a record, and ensure we can't access it or any trace of its variants
+        table.delete(tue).unwrap();
+        assert!(table.get_with_record_id(tue).is_err());
+
+        //Since "Tuesday" had one variant overlap with "Thursday", i.e. "Tusday", make sure we now find
+        // "Thursday" when we attempt to lookup "Tuesday"
+        let result = table.lookup_best("Tuesday", Table::<String, 2, 8, true>::edit_distance).unwrap();
+        assert_eq!(result, thu);
+
+        //Delete "Saturday" and make sure we see no matches when we try to search for it
+        table.delete(sat).unwrap();
+        assert!(table.get_with_record_id(sat).is_err());
+        let results : Vec<RecordID> = table.lookup_fuzzy_raw("Saturday").unwrap().collect();
+        assert_eq!(results.len(), 0);
+
+
+
 
         //GOATGOATGOAT
-        //Deleting a record, and test that it's gone
+        //Replace an existing record, where we pass in an existing record and replace both its key and val
+        //Replace a record we have deleted
+        //Attempt to replace an invalid record and confirm we get a reasonable error
 
 
     }
