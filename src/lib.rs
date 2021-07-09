@@ -212,15 +212,50 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
     fn replace_internal(&mut self, record_id : RecordID, raw_key : &[u8], value : &T) -> Result<(), String> {
         if self.record_id_is_valid(record_id) {
 
-            if self.get_with_record_id_internal(record_id).is_ok() {
-                self.delete(record_id)?;
+            let existing_record_result = self.get_with_record_id_internal(record_id);
+
+            //NOTE: There are 3 paths through this function once we validate we have a valid record_id
+            //1. The existing record has been deleted, in which case we just insert a new record
+            //2. The existing record exists and the keys match, in which case we just replace the value
+            //3. The existing record exists and the keys don't match, in which case we must delete the existing record and insert a new record
+
+            if let Ok((existing_key, _existing_val)) = existing_record_result {
+                if *existing_key == *raw_key {
+                    //Case 2
+                    self.put_record_internal(record_id, raw_key, value)?;
+                } else {
+                    //Case 3
+                    self.delete(record_id)?;
+                    self.insert_internal(raw_key, value, Some(record_id))?;
+                }
+            } else {
+                //Case 1
+                self.insert_internal(raw_key, value, Some(record_id))?;
             }
             
-            self.insert_internal(raw_key, value, Some(record_id))?;
             Ok(())
         } else {
             Err("Invalid record_id".to_string())
         }
+    }
+
+    /// Creates the records structure in the records table
+    /// If we are updating an old record, we will overwrite it.
+    /// 
+    /// NOTE: This function will NOT update any variants used to locate the key
+    fn put_record_internal(&mut self, record_id : RecordID, raw_key : &[u8], value : &T) -> Result<(), String>{
+        
+        //Create the records struct, serialize it, and put in into the records table.
+        let records_cf_handle = self.db.cf_handle(RECORDS_CF_NAME).unwrap();
+        let record = RecordSer::<T, UNICODE_KEYS>{
+            key : raw_key,
+            value : Some(value)
+        };
+        let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
+        let record_bytes = record_coder.serialize(&record).unwrap();
+        self.db.put_cf(records_cf_handle, usize::to_le_bytes(record_id.0), record_bytes)?;
+
+        Ok(())
     }
 
     /// Inserts a record into the Table, called by insert(), which is implemented differently depending
@@ -240,16 +275,8 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
             Some(record_id) => record_id
         };
 
-        //Create the records structure, serialize it, and put in into the records table.
-        //If we are updating an old record, we will overwrite it but the key and record_id will stay the same
-        let records_cf_handle = self.db.cf_handle(RECORDS_CF_NAME).unwrap();
-        let record = RecordSer::<T, UNICODE_KEYS>{
-            key : raw_key,
-            value : Some(value)
-        };
-        let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
-        let record_bytes = record_coder.serialize(&record).unwrap();
-        self.db.put_cf(records_cf_handle, usize::to_le_bytes(new_record_id.0), record_bytes)?;
+        //Put the record into the records table
+        self.put_record_internal(new_record_id, raw_key, value)?;
 
         //Now compute all the variants so we'll be able to add an entry to each one
         let variants = Self::variants(&raw_key);
@@ -986,7 +1013,7 @@ mod tests {
         //Insert some records
         let sun = table.insert("Sunday", &"Nichiyoubi".to_string()).unwrap();
         let sat = table.insert("Saturday", &"Douyoubi".to_string()).unwrap();
-        let _fri = table.insert("Friday", &"Kinyoubi".to_string()).unwrap();
+        let fri = table.insert("Friday", &"Kinyoubi".to_string()).unwrap();
         let thu = table.insert("Thursday", &"Mokuyoubi".to_string()).unwrap();
         let wed = table.insert("Wednesday", &"Suiyoubi".to_string()).unwrap();
         let tue = table.insert("Tuesday", &"Kayoubi".to_string()).unwrap();
@@ -1080,10 +1107,11 @@ mod tests {
         //Attempt to replace an invalid record and confirm we get a reasonable error
         assert!(table.replace(RecordID::NULL, "Nullday", &"Null".to_string()).is_err());
 
-
-        //GOATGOATGOAT
-        //add set_value method, which is a cheaper version of replace that doesn't attempt to change the key, just the value
-
+        //Test the fast-path of the replace method, when the keys are identical
+        table.replace(fri, "Friday", &"Geumyoil".to_string()).unwrap();
+        let (key, val) = table.get_with_record_id(fri).unwrap();
+        assert_eq!(key, "Friday");
+        assert_eq!(val, "Geumyoil");
 
     }
 }
