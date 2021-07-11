@@ -16,7 +16,7 @@ will result in two distinct records.
 
 ## Usage Example
 
-```Rust
+```rust
 use fuzzy_rocks::{*};
 
 //Create and reset the FuzzyRocks Table
