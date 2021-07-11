@@ -31,12 +31,12 @@
 //! let mon = table.insert("Monday", &"Getsuyoubi".to_string()).unwrap();
 //! 
 //! //Try out lookup_best, to get the closest fuzzy match
-//! let result = table.lookup_best("Bonday", Table::<String, 2, 8, true>::edit_distance).unwrap();
+//! let result = table.lookup_best("Bonday", table.default_distance_func()).unwrap();
 //! assert_eq!(result, mon);
 //! 
 //! //Try out lookup_fuzzy, to get all matches and their distances
 //! let results : Vec<(RecordID, u64)> = table
-//!     .lookup_fuzzy("Tuesday", Table::<String, 2, 8, true>::edit_distance, 2)
+//!     .lookup_fuzzy("Tuesday", table.default_distance_func(), 2)
 //!     .unwrap().collect();
 //! assert_eq!(results.len(), 2);
 //! assert!(results.contains(&(tue, 0))); //Tuesday -> Tuesday with 0 edits
@@ -57,10 +57,14 @@
 //! This crate includes a simple [Levenstein Distance](https://en.wikipedia.org/wiki/Levenshtein_distance) function
 //! called [edit_distance](Table::edit_distance).  However, you may often want to use a different function.
 //! 
-//! One reason to use a custom distance function is to account for expected variations. For example:
+//! One reason to use a custom distance function is to account for expected variation patterns. For example:
 //! a distance function that considers likely [OCR](https://en.wikipedia.org/wiki/Optical_character_recognition)
-//! errors might consider `ol` to be very close to `d`, `0` to be extremely close to `O`, and `A` to be
-//! somewhat near to `^`, while `#` would be much further from `,`
+//! errors might consider 'lo' to be very close to 'b', '0' to be extremely close to 'O', and 'A' to be
+//! somewhat near to '^', while '#' would be much further from ',' even though the Levenstein distances
+//! tell a different story with 'lo' being two edits away from 'b' and '#' being only one edit away from
+//! ',' (comma).
+//! 
+//! You may have a different distance function to catch common typos on a QWERTY keyboard, etc.
 //! 
 //! Another reason for a custom distance function is if your keys are not human-readable strings, in which
 //! case you may need a different interpretation of variances between keys.  For example DNA snippets could
@@ -456,6 +460,8 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
     }
 
     /// Checks the table for records with keys that precisely match the key supplied
+    /// 
+    /// This function will be more efficient than a fuzzy lookup.
     fn lookup_exact_internal<'a>(&'a self, raw_key : &'a [u8]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
 
         let meaningful_key = Self::meaningful_key_substring(raw_key);
@@ -509,7 +515,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn get_value_with_record_id(&self, record_id : RecordID) -> Result<T, String> {
+    pub fn get_value(&self, record_id : RecordID) -> Result<T, String> {
 
         //Get the Record structure by deserializing the bytes from the db
         let records_cf_handle = self.db.cf_handle(RECORDS_CF_NAME).unwrap();
@@ -700,7 +706,14 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
         }
     }
 
-    /// An implementation of the basic Levenstein distance function, which may be passed to [Table::lookup_fuzzy]
+    /// Convenience function that returns the [edit_distance](Table::edit_distance) function associated with a Table
+    pub fn default_distance_func(&self) -> impl Fn(&[u8], &[u8]) -> u64 {
+        Self::edit_distance
+    }
+
+    /// An implementation of the basic Levenstein distance function, which may be passed to
+    /// [lookup_fuzzy](Table::lookup_fuzzy), [lookup_best](Table::lookup_best), or used anywhere
+    /// else a distance function is needed.
     /// 
     /// This implementation uses the Wagner-Fischer Algorithm, as it's described [here](https://en.wikipedia.org/wiki/Levenshtein_distance)
     pub fn edit_distance(key_a : &[u8], key_b : &[u8]) -> u64 {
@@ -1221,16 +1234,16 @@ mod tests {
         assert_eq!(results.len(), 0);
 
         //Test lookup_best, using the supplied edit_distance function
-        let result = table.lookup_best("Bonday", Table::<String, 2, 8, true>::edit_distance).unwrap();
+        let result = table.lookup_best("Bonday", table.default_distance_func()).unwrap();
         assert_eq!(result, mon);
 
         //Test lookup_best, when there is no acceptable match
-        let result = table.lookup_best("Rahu", Table::<String, 2, 8, true>::edit_distance);
+        let result = table.lookup_best("Rahu", table.default_distance_func());
         assert!(result.is_err());
 
         //Test lookup_fuzzy with a perfect match, using the supplied edit_distance function
         //In this case, we should only get one match within edit-distance 2
-        let results : Vec<(String, String, u64)> = table.lookup_fuzzy("Saturday", Table::<String, 2, 8, true>::edit_distance, 2)
+        let results : Vec<(String, String, u64)> = table.lookup_fuzzy("Saturday", table.default_distance_func(), 2)
             .unwrap().map(|(record_id, distance)| {
                 let (key, val) = table.get_record(record_id).unwrap();
                 (key, val, distance)
@@ -1241,7 +1254,7 @@ mod tests {
         assert_eq!(results[0].2, 0);
 
         //Test lookup_fuzzy with a perfect match, but where we'll hit another imperfect match as well
-        let results : Vec<(String, String, u64)> = table.lookup_fuzzy("Tuesday", Table::<String, 2, 8, true>::edit_distance, 2)
+        let results : Vec<(String, String, u64)> = table.lookup_fuzzy("Tuesday", table.default_distance_func(), 2)
             .unwrap().map(|(record_id, distance)| {
                 let (key, val) = table.get_record(record_id).unwrap();
                 (key, val, distance)
@@ -1251,7 +1264,7 @@ mod tests {
         assert!(results.contains(&("Thursday".to_string(), "Mokuyoubi".to_string(), 2)));
 
         //Test lookup_fuzzy where we should get no match
-        let results : Vec<(RecordID, u64)> = table.lookup_fuzzy("Rahu", Table::<String, 2, 8, true>::edit_distance, 2).unwrap().collect();
+        let results : Vec<(RecordID, u64)> = table.lookup_fuzzy("Rahu", table.default_distance_func(), 2).unwrap().collect();
         assert_eq!(results.len(), 0);
 
         //Test lookup_fuzzy_raw, to get all of the SymSpell Delete variants
@@ -1266,7 +1279,7 @@ mod tests {
 
         //Since "Tuesday" had one variant overlap with "Thursday", i.e. "Tusday", make sure we now find
         // "Thursday" when we attempt to lookup "Tuesday"
-        let result = table.lookup_best("Tuesday", Table::<String, 2, 8, true>::edit_distance).unwrap();
+        let result = table.lookup_best("Tuesday", table.default_distance_func()).unwrap();
         assert_eq!(result, thu);
 
         //Delete "Saturday" and make sure we see no matches when we try to search for it
@@ -1318,7 +1331,7 @@ mod tests {
         let _three = table.insert(b"San", &3.0).unwrap();
         let pi = table.insert(b"Pi", &3.1415926535).unwrap();
 
-        let result = table.lookup_best(b"P", Table::<String, 1, 8, false>::edit_distance).unwrap();
+        let result = table.lookup_best(b"P", table.default_distance_func()).unwrap();
         assert_eq!(result, pi);
         
         let results : Vec<RecordID> = table.lookup_fuzzy_raw(b"ne").unwrap().collect();
@@ -1327,4 +1340,7 @@ mod tests {
     }
 }
 
-//GOATGOATGOAT, I want to do something less error-prone than "Table::<String, 1, 8, false>::edit_distance" when referring to the associated functions...
+//GOATGOATGOAT
+//Add ReadME
+//Specify specific versions of dependencies in Cargo.toml
+//
