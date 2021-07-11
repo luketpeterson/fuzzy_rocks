@@ -578,9 +578,11 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
         
         let meaningful_key = Self::meaningful_key_substring(key);
 
-        variants_set.insert(meaningful_key.clone());
-        Self::variants_recursive(&meaningful_key[..], 0, &mut variants_set);
-    
+        if 0 < MAX_DELETES {
+            Self::variants_recursive(&meaningful_key[..], 0, &mut variants_set);
+        }
+        variants_set.insert(meaningful_key);
+        
         variants_set
     }
     
@@ -660,8 +662,12 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
                 .collect();
             new_str.into_bytes()
         } else {
-            let (prefix, _remainder) = s.split_at(MEANINGFUL_KEY_LEN);
-            prefix.to_owned()
+            if s.len() > len {
+                let (prefix, _remainder) = s.split_at(len);
+                prefix.to_owned()
+            } else {
+                s.to_owned()
+            }
         }
     }
 
@@ -797,8 +803,90 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
     }
 }
 
-// GOATGOAT, Provide a unicode=false implementation
+impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize>Table<T, MAX_DELETES, MEANINGFUL_KEY_LEN, false> {
 
+    /// Inserts a new key-value pair into the table and returns the RecordID of the new record
+    /// 
+    /// This function will always create a new record, regardless of whether an identical key exists.
+    /// It is permissible to have two distinct records with identical keys.
+    /// 
+    /// NOTE: This function takes an &T for value rather than an owned T because it must make an
+    /// internal copy regardless of passed ownership, so requiring an owned object would ofter
+    /// result in a redundant copy.  However this is different from most containers, and makes things
+    /// feel awkward when using [String] types for values.
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn insert(&mut self, key : &[u8], value : &T) -> Result<RecordID, String> {
+        self.insert_internal(key, value, None)
+    }
+
+    /// Replaces a record in the Table with the supplied key-value pair
+    /// 
+    /// If the supplied `record_id` references an existing record, the existing record contents will
+    /// be deleted.  If the supplied `record_id` references a record that has been deleted, this
+    /// function will succeed, but is the `record_id` is invalid then this function will return an
+    /// error.
+    /// 
+    /// If the key exactly matches the existing record's key, this function will be more efficient
+    /// as it will not need to update the stored variants.
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn replace(&mut self, record_id : RecordID, key : &[u8], value : &T) -> Result<(), String> {
+        self.replace_internal(record_id, key, value)
+    }
+
+    /// Returns the key and value associated with the specified record
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn get_with_record_id(&self, record_id : RecordID) -> Result<(Box<[u8]>, T), String> {
+        self.get_with_record_id_internal(record_id)
+    }
+
+    /// Locates all records in the table with keys that precisely match the key supplied
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn lookup_exact<'a>(&'a self, key : &'a [u8]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
+        self.lookup_exact_internal(key)
+    }
+
+    /// Locates all records in the table with a key that is within a deletion distance of MAX_DELETES of
+    /// the key supplied, based on the SymSpell algorithm.
+    /// 
+    /// This function underlies all fuzzy lookups, and does no further filtering based on any distance function.
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn lookup_fuzzy_raw<'a>(&'a self, key : &'a [u8]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
+        self.lookup_fuzzy_raw_internal(key)
+    }
+
+    /// Locates all records in the table for which the supplied `distance_function` evaluates to a result smaller
+    /// than the supplied `threshold` when comparing the record's key with the supplied `key`
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn lookup_fuzzy<'a, D : 'static + Copy + Zero + PartialOrd, F : 'a + Fn(&[u8], &[u8])->D>(&'a self, key : &'a [u8], distance_function : F, threshold : D) -> Result<impl Iterator<Item=(RecordID, D)> + 'a, String> {
+        self.lookup_fuzzy_internal(key, distance_function, Some(threshold))
+    }
+
+    /// Locates the record in the table for which the supplied `distance_function` evaluates to the lowest value
+    /// when comparing the record's key with the supplied `key`.
+    /// 
+    /// If no matching record is found within the table's `MAX_DELETES`, this method will return an error.
+    /// 
+    /// NOTE: If two or more results have the same returned distance value and that is the smallest value, the
+    /// implementation does not specify which result will be returned.
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn lookup_best<D : 'static + Copy + Zero + PartialOrd, F : Fn(&[u8], &[u8])->D>(&self, key : &[u8], distance_function : F) -> Result<RecordID, String> {
+        self.lookup_best_internal(key, distance_function)
+    }
+}
 
 impl <T : Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize, const UNICODE_KEYS : bool>Drop for Table<T, MAX_DELETES, MEANINGFUL_KEY_LEN, UNICODE_KEYS> {
     fn drop(&mut self) {
@@ -1187,5 +1275,25 @@ mod tests {
         assert_eq!(key, "Friday");
         assert_eq!(val, "Geumyoil");
 
+    }
+
+    #[test]
+    /// This test is tests some basic non-unicode key functionality.
+    fn non_unicode_key_test() {
+
+        let mut table = Table::<f32, 1, 8, false>::new("test2.rocks").unwrap();
+        table.reset().unwrap();
+
+        let one = table.insert(b"One", &1.0).unwrap();
+        let _two = table.insert(b"Dos", &2.0).unwrap();
+        let _three = table.insert(b"San", &3.0).unwrap();
+        let pi = table.insert(b"Pi", &3.1415926535).unwrap();
+
+        let result = table.lookup_best(b"P", Table::<String, 1, 8, false>::edit_distance).unwrap();
+        assert_eq!(result, pi);
+        
+        let results : Vec<RecordID> = table.lookup_fuzzy_raw(b"ne").unwrap().collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], one);
     }
 }
