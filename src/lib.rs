@@ -151,26 +151,26 @@ use rocksdb::{DB, DBWithThreadMode, ColumnFamily, ColumnFamilyDescriptor, MergeO
 /// performance cost, however, so passing `false` is more efficient if you plan to use regular ascii or
 /// any other kind of data as the table's keys.
 /// 
-pub struct Table<T : Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize, const UNICODE_KEYS : bool> {
+pub struct Table<ValueT : Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize, const UNICODE_KEYS : bool> {
     record_count : usize,
     db : DBWithThreadMode<rocksdb::SingleThreaded>,
     path : String,
-    phantom: PhantomData<T>,
+    phantom: PhantomData<ValueT>,
 }
 
 //NOTE: We have two flavors of the Record struct so we don't need to make an extra copy of the data when
 //serializing, but I'm not sure how to avoid the copy when deserializing
 #[derive(Serialize)]
-struct RecordSer<'a, T : Serialize, const UNICODE_KEYS : bool> {
+struct RecordSer<'a, ValueT : Serialize, const UNICODE_KEYS : bool> {
     key : &'a [u8],
-    value : Option<&'a T>
+    value : Option<&'a ValueT>
 }
 
 #[derive(Deserialize)]
-struct RecordDeser<T : serde::de::DeserializeOwned, const UNICODE_KEYS : bool> {
+struct RecordDeser<ValueT : serde::de::DeserializeOwned, const UNICODE_KEYS : bool> {
     key : Box<[u8]>, //NOTE: we could avoid this secondary allocation with a maximum_key_length, but currently we don't have one
-    #[serde(bound(deserialize = "T: serde::de::DeserializeOwned"))]
-    value : Option<T>
+    #[serde(bound(deserialize = "ValueT: serde::de::DeserializeOwned"))]
+    value : Option<ValueT>
 }
 
 /// A unique identifier for a record within a [Table]
@@ -183,7 +183,7 @@ impl RecordID {
 const RECORDS_CF_NAME : &str = "records";
 const VARIANTS_CF_NAME : &str = "variants";
 
-impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize, const UNICODE_KEYS : bool>Table<T, MAX_DELETES, MEANINGFUL_KEY_LEN, UNICODE_KEYS> {
+impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize, const UNICODE_KEYS : bool>Table<ValueT, MAX_DELETES, MEANINGFUL_KEY_LEN, UNICODE_KEYS> {
 
     /// Creates a new Table, backed by the database at the path provided
     /// 
@@ -259,7 +259,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
     /// 
     /// A deleted record cannot be accessed or otherwise found, but the RecordID may be reassigned
     /// using [Table::replace].
-    pub fn delete(&mut self, record_id : RecordID) -> Result<T, String> {
+    pub fn delete(&mut self, record_id : RecordID) -> Result<ValueT, String> {
 
         //Get the key for the record we're removing, so we can compute all the variants
         let (raw_key, value) = self.get_record_internal(record_id)?;
@@ -296,7 +296,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
         //NOTE: We replace the record rather than delete it because we assume there are no gaps in the
         // RecordIDs, when assigning new a RecordID
         let records_cf_handle = self.db.cf_handle(RECORDS_CF_NAME).unwrap();
-        let empty_record = RecordSer::<T, UNICODE_KEYS>{
+        let empty_record = RecordSer::<ValueT, UNICODE_KEYS>{
             key : b"",
             value : None
         };
@@ -307,7 +307,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
         Ok(value)
     }
 
-    fn replace_internal(&mut self, record_id : RecordID, raw_key : &[u8], value : &T) -> Result<(), String> {
+    fn replace_internal(&mut self, record_id : RecordID, raw_key : &[u8], value : &ValueT) -> Result<(), String> {
         if self.record_id_is_valid(record_id) {
 
             let existing_record_result = self.get_record_internal(record_id);
@@ -341,11 +341,11 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
     /// If we are updating an old record, we will overwrite it.
     /// 
     /// NOTE: This function will NOT update any variants used to locate the key
-    fn put_record_internal(&mut self, record_id : RecordID, raw_key : &[u8], value : &T) -> Result<(), String>{
+    fn put_record_internal(&mut self, record_id : RecordID, raw_key : &[u8], value : &ValueT) -> Result<(), String>{
         
         //Create the records struct, serialize it, and put in into the records table.
         let records_cf_handle = self.db.cf_handle(RECORDS_CF_NAME).unwrap();
-        let record = RecordSer::<T, UNICODE_KEYS>{
+        let record = RecordSer::<ValueT, UNICODE_KEYS>{
             key : raw_key,
             value : Some(value)
         };
@@ -361,7 +361,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    fn insert_internal(&mut self, raw_key : &[u8], value : &T, supplied_id : Option<RecordID>) -> Result<RecordID, String> {
+    fn insert_internal(&mut self, raw_key : &[u8], value : &ValueT, supplied_id : Option<RecordID>) -> Result<RecordID, String> {
 
         let new_record_id = match supplied_id {
             None => {
@@ -515,13 +515,13 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn get_value(&self, record_id : RecordID) -> Result<T, String> {
+    pub fn get_value(&self, record_id : RecordID) -> Result<ValueT, String> {
 
         //Get the Record structure by deserializing the bytes from the db
         let records_cf_handle = self.db.cf_handle(RECORDS_CF_NAME).unwrap();
         if let Some(record_bytes) = self.db.get_pinned_cf(records_cf_handle, record_id.0.to_le_bytes())? {
             let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
-            let record : RecordDeser::<T, UNICODE_KEYS> = record_coder.deserialize(&record_bytes).unwrap();
+            let record : RecordDeser::<ValueT, UNICODE_KEYS> = record_coder.deserialize(&record_bytes).unwrap();
 
             match record.value {
                 Some(value) => Ok(value),
@@ -537,13 +537,13 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    fn get_record_internal(&self, record_id : RecordID) -> Result<(Box<[u8]>, T), String> {
+    fn get_record_internal(&self, record_id : RecordID) -> Result<(Box<[u8]>, ValueT), String> {
 
         //Get the Record structure by deserializing the bytes from the db
         let records_cf_handle = self.db.cf_handle(RECORDS_CF_NAME).unwrap();
         if let Some(record_bytes) = self.db.get_pinned_cf(records_cf_handle, record_id.0.to_le_bytes())? {
             let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
-            let record : RecordDeser::<T, UNICODE_KEYS> = record_coder.deserialize(&record_bytes).unwrap();
+            let record : RecordDeser::<ValueT, UNICODE_KEYS> = record_coder.deserialize(&record_bytes).unwrap();
 
             match record.value {
                 Some(value) => Ok((record.key, value)),
@@ -760,7 +760,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
     }
 }
 
-impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize>Table<T, MAX_DELETES, MEANINGFUL_KEY_LEN, true> {
+impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize>Table<ValueT, MAX_DELETES, MEANINGFUL_KEY_LEN, true> {
 
     /// Inserts a new key-value pair into the table and returns the RecordID of the new record
     /// 
@@ -774,7 +774,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn insert(&mut self, key : &str, value : &T) -> Result<RecordID, String> {
+    pub fn insert(&mut self, key : &str, value : &ValueT) -> Result<RecordID, String> {
         self.insert_internal(key.as_bytes(), value, None)
     }
 
@@ -790,7 +790,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn replace(&mut self, record_id : RecordID, key : &str, value : &T) -> Result<(), String> {
+    pub fn replace(&mut self, record_id : RecordID, key : &str, value : &ValueT) -> Result<(), String> {
         self.replace_internal(record_id, key.as_bytes(), value)
     }
 
@@ -798,7 +798,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn get_record(&self, record_id : RecordID) -> Result<(String, T), String> {
+    pub fn get_record(&self, record_id : RecordID) -> Result<(String, ValueT), String> {
         self.get_record_internal(record_id).map(|(key, val)| (String::from_utf8(key.to_vec()).unwrap(), val))
     }
 
@@ -845,7 +845,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
     }
 }
 
-impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize>Table<T, MAX_DELETES, MEANINGFUL_KEY_LEN, false> {
+impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize>Table<ValueT, MAX_DELETES, MEANINGFUL_KEY_LEN, false> {
 
     /// Inserts a new key-value pair into the table and returns the RecordID of the new record
     /// 
@@ -859,7 +859,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn insert(&mut self, key : &[u8], value : &T) -> Result<RecordID, String> {
+    pub fn insert(&mut self, key : &[u8], value : &ValueT) -> Result<RecordID, String> {
         self.insert_internal(key, value, None)
     }
 
@@ -875,7 +875,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn replace(&mut self, record_id : RecordID, key : &[u8], value : &T) -> Result<(), String> {
+    pub fn replace(&mut self, record_id : RecordID, key : &[u8], value : &ValueT) -> Result<(), String> {
         self.replace_internal(record_id, key, value)
     }
 
@@ -883,7 +883,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn get_record(&self, record_id : RecordID) -> Result<(Box<[u8]>, T), String> {
+    pub fn get_record(&self, record_id : RecordID) -> Result<(Box<[u8]>, ValueT), String> {
         self.get_record_internal(record_id)
     }
 
@@ -930,7 +930,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
     }
 }
 
-impl <T : Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize, const UNICODE_KEYS : bool>Drop for Table<T, MAX_DELETES, MEANINGFUL_KEY_LEN, UNICODE_KEYS> {
+impl <ValueT : Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize, const UNICODE_KEYS : bool>Drop for Table<ValueT, MAX_DELETES, MEANINGFUL_KEY_LEN, UNICODE_KEYS> {
     fn drop(&mut self) {
         //Close down Rocks
         self.db.flush().unwrap();
