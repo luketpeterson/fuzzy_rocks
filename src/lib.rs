@@ -17,7 +17,36 @@
 //! 
 //! ## Usage Example
 //! 
-//! GOATGOATGOAT, Add usage example
+//! ```
+//! use fuzzy_rocks::{*};
+//! 
+//! //Create and reset the FuzzyRocks Table
+//! let mut table = Table::<String, 2, 8, true>::new("test.rocks").unwrap();
+//! table.reset().unwrap();
+//!
+//! //Insert some records
+//! let thu = table.insert("Thursday", &"Mokuyoubi".to_string()).unwrap();
+//! let wed = table.insert("Wednesday", &"Suiyoubi".to_string()).unwrap();
+//! let tue = table.insert("Tuesday", &"Kayoubi".to_string()).unwrap();
+//! let mon = table.insert("Monday", &"Getsuyoubi".to_string()).unwrap();
+//! 
+//! //Try out lookup_best, to get the closest fuzzy match
+//! let result = table.lookup_best("Bonday", Table::<String, 2, 8, true>::edit_distance).unwrap();
+//! assert_eq!(result, mon);
+//! 
+//! //Try out lookup_fuzzy, to get all matches and their distances
+//! let results : Vec<(RecordID, u64)> = table
+//!     .lookup_fuzzy("Tuesday", Table::<String, 2, 8, true>::edit_distance, 2)
+//!     .unwrap().collect();
+//! assert_eq!(results.len(), 2);
+//! assert!(results.contains(&(tue, 0))); //Tuesday -> Tuesday with 0 edits
+//! assert!(results.contains(&(thu, 2))); //Thursday -> Tuesday with 2 edits
+//! 
+//! //Retrieve the key and value from a record
+//! let (key, val) = table.get_record(wed).unwrap();
+//! assert_eq!(key, "Wednesday");
+//! assert_eq!(val, "Suiyoubi");
+//! ```
 //! 
 //! ## Distance Functions
 //! 
@@ -229,7 +258,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
     pub fn delete(&mut self, record_id : RecordID) -> Result<T, String> {
 
         //Get the key for the record we're removing, so we can compute all the variants
-        let (raw_key, value) = self.get_with_record_id_internal(record_id)?;
+        let (raw_key, value) = self.get_record_internal(record_id)?;
         let variants = Self::variants(&raw_key);
 
         //Loop over each variant, and remove the record_id from its associated variant entry in
@@ -277,7 +306,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
     fn replace_internal(&mut self, record_id : RecordID, raw_key : &[u8], value : &T) -> Result<(), String> {
         if self.record_id_is_valid(record_id) {
 
-            let existing_record_result = self.get_with_record_id_internal(record_id);
+            let existing_record_result = self.get_record_internal(record_id);
 
             //NOTE: There are 3 paths through this function once we validate we have a valid record_id
             //1. The existing record has been deleted, in which case we just insert a new record
@@ -392,7 +421,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
             candidate_iter.filter_map(move |record_id| {
 
                 //Check the record's key with the distance function
-                let (record_key, _val) = self.get_with_record_id_internal(record_id).unwrap();
+                let (record_key, _val) = self.get_record_internal(record_id).unwrap();
                 let distance = distance_function(&record_key, raw_key);
 
                 match threshold {
@@ -502,7 +531,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    fn get_with_record_id_internal(&self, record_id : RecordID) -> Result<(Box<[u8]>, T), String> {
+    fn get_record_internal(&self, record_id : RecordID) -> Result<(Box<[u8]>, T), String> {
 
         //Get the Record structure by deserializing the bytes from the db
         let records_cf_handle = self.db.cf_handle(RECORDS_CF_NAME).unwrap();
@@ -756,8 +785,8 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn get_with_record_id(&self, record_id : RecordID) -> Result<(String, T), String> {
-        self.get_with_record_id_internal(record_id).map(|(key, val)| (String::from_utf8(key.to_vec()).unwrap(), val))
+    pub fn get_record(&self, record_id : RecordID) -> Result<(String, T), String> {
+        self.get_record_internal(record_id).map(|(key, val)| (String::from_utf8(key.to_vec()).unwrap(), val))
     }
 
     /// Locates all records in the table with keys that precisely match the key supplied
@@ -841,8 +870,8 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES :
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn get_with_record_id(&self, record_id : RecordID) -> Result<(Box<[u8]>, T), String> {
-        self.get_with_record_id_internal(record_id)
+    pub fn get_record(&self, record_id : RecordID) -> Result<(Box<[u8]>, T), String> {
+        self.get_record_internal(record_id)
     }
 
     /// Locates all records in the table with keys that precisely match the key supplied
@@ -1152,7 +1181,7 @@ mod tests {
         assert_eq!(record_id.0 + 1, tsv_record_count);
 
         //Confirm we can find a known city (London)
-        let london_results : Vec<(String, i32)> = table.lookup_exact("london").unwrap().map(|record_id| table.get_with_record_id(record_id).unwrap()).collect();
+        let london_results : Vec<(String, i32)> = table.lookup_exact("london").unwrap().map(|record_id| table.get_record(record_id).unwrap()).collect();
         assert!(london_results.contains(&("london".to_string(), 2643743)));
 
         //Close RocksDB connection by dropping the table object
@@ -1161,7 +1190,7 @@ mod tests {
 
         //Reopen the table and confirm that "London" is still there
         let table = Table::<i32, 2, 12, true>::new("geonames.rocks").unwrap();
-        let london_results : Vec<(String, i32)> = table.lookup_exact("london").unwrap().map(|record_id| table.get_with_record_id(record_id).unwrap()).collect();
+        let london_results : Vec<(String, i32)> = table.lookup_exact("london").unwrap().map(|record_id| table.get_record(record_id).unwrap()).collect();
         assert!(london_results.contains(&("london".to_string(), 2643743)));
     }
 
@@ -1182,13 +1211,13 @@ mod tests {
         let mon = table.insert("Monday", &"Getsuyoubi".to_string()).unwrap();
 
         //Test lookup_exact
-        let results : Vec<(String, String)> = table.lookup_exact("Friday").unwrap().map(|record_id| table.get_with_record_id(record_id).unwrap()).collect();
+        let results : Vec<(String, String)> = table.lookup_exact("Friday").unwrap().map(|record_id| table.get_record(record_id).unwrap()).collect();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "Friday");
         assert_eq!(results[0].1, "Kinyoubi");
 
         //Test lookup_exact, with a query that should provide no results
-        let results : Vec<(String, String)> = table.lookup_exact("friday").unwrap().map(|record_id| table.get_with_record_id(record_id).unwrap()).collect();
+        let results : Vec<(String, String)> = table.lookup_exact("friday").unwrap().map(|record_id| table.get_record(record_id).unwrap()).collect();
         assert_eq!(results.len(), 0);
 
         //Test lookup_best, using the supplied edit_distance function
@@ -1203,7 +1232,7 @@ mod tests {
         //In this case, we should only get one match within edit-distance 2
         let results : Vec<(String, String, u64)> = table.lookup_fuzzy("Saturday", Table::<String, 2, 8, true>::edit_distance, 2)
             .unwrap().map(|(record_id, distance)| {
-                let (key, val) = table.get_with_record_id(record_id).unwrap();
+                let (key, val) = table.get_record(record_id).unwrap();
                 (key, val, distance)
             }).collect();
         assert_eq!(results.len(), 1);
@@ -1214,7 +1243,7 @@ mod tests {
         //Test lookup_fuzzy with a perfect match, but where we'll hit another imperfect match as well
         let results : Vec<(String, String, u64)> = table.lookup_fuzzy("Tuesday", Table::<String, 2, 8, true>::edit_distance, 2)
             .unwrap().map(|(record_id, distance)| {
-                let (key, val) = table.get_with_record_id(record_id).unwrap();
+                let (key, val) = table.get_record(record_id).unwrap();
                 (key, val, distance)
             }).collect();
         assert_eq!(results.len(), 2);
@@ -1233,7 +1262,7 @@ mod tests {
 
         //Test deleting a record, and ensure we can't access it or any trace of its variants
         table.delete(tue).unwrap();
-        assert!(table.get_with_record_id(tue).is_err());
+        assert!(table.get_record(tue).is_err());
 
         //Since "Tuesday" had one variant overlap with "Thursday", i.e. "Tusday", make sure we now find
         // "Thursday" when we attempt to lookup "Tuesday"
@@ -1242,13 +1271,13 @@ mod tests {
 
         //Delete "Saturday" and make sure we see no matches when we try to search for it
         table.delete(sat).unwrap();
-        assert!(table.get_with_record_id(sat).is_err());
+        assert!(table.get_record(sat).is_err());
         let results : Vec<RecordID> = table.lookup_fuzzy_raw("Saturday").unwrap().collect();
         assert_eq!(results.len(), 0);
 
         //Test replacing a record with another one and ensure the right data is retained
         table.replace(wed, "Miercoles", &"Zhousan".to_string()).unwrap();
-        let results : Vec<(String, String)> = table.lookup_exact("Miercoles").unwrap().map(|record_id| table.get_with_record_id(record_id).unwrap()).collect();
+        let results : Vec<(String, String)> = table.lookup_exact("Miercoles").unwrap().map(|record_id| table.get_record(record_id).unwrap()).collect();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "Miercoles");
         assert_eq!(results[0].1, "Zhousan");
@@ -1258,7 +1287,7 @@ mod tests {
 
         //Test replacing a record that we deleted earlier
         table.replace(sat, "Sabado", &"Zhouliu".to_string()).unwrap();
-        let results : Vec<(String, String)> = table.lookup_exact("Sabado").unwrap().map(|record_id| table.get_with_record_id(record_id).unwrap()).collect();
+        let results : Vec<(String, String)> = table.lookup_exact("Sabado").unwrap().map(|record_id| table.get_record(record_id).unwrap()).collect();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "Sabado");
         assert_eq!(results[0].1, "Zhouliu");
@@ -1271,7 +1300,7 @@ mod tests {
 
         //Test the fast-path of the replace method, when the keys are identical
         table.replace(fri, "Friday", &"Geumyoil".to_string()).unwrap();
-        let (key, val) = table.get_with_record_id(fri).unwrap();
+        let (key, val) = table.get_record(fri).unwrap();
         assert_eq!(key, "Friday");
         assert_eq!(val, "Geumyoil");
 
@@ -1297,3 +1326,5 @@ mod tests {
         assert_eq!(results[0], one);
     }
 }
+
+//GOATGOATGOAT, I want to do something less error-prone than "Table::<String, 1, 8, false>::edit_distance" when referring to the associated functions...
