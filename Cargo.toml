@@ -3,6 +3,10 @@ name = "fuzzy_rocks"
 version = "0.1.0"
 authors = ["Luke Peterson <luke@infoplatter.com>"]
 edition = "2018"
+license = "MIT OR Apache-2.0"
+description = "A persistent datastore backed by RocksDB with fuzzy key lookup using an arbitrary distance function accelerated by the SymSpell algorithm"
+repository = "https://github.com/luketpeterson/fuzzy_rocks/"
+readme = "README.md"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
