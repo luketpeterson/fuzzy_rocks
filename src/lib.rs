@@ -1,26 +1,76 @@
 
 //! # fuzzy_rocks Overview
 //! 
-//! A persistent key-value store backed by [RocksDB](https://rocksdb.org) with fuzzy lookup using an
-//! arbitrary distance function and accelerated by the [SymSpell](https://github.com/wolfgarbe/SymSpell) algorithm.
-//!
-//! This crate is designed for large databases where startup time and resident memory footprint are significant
-//! considerations.  This create has been tested with 250,000 unique keys and about 10 million variants.
+//! A persistent datastore backed by [RocksDB](https://rocksdb.org) with fuzzy key lookup using an arbitrary
+//! distance function accelerated by the [SymSpell](https://github.com/wolfgarbe/SymSpell) algorithm.
 //! 
-//! GOATGOATGOAT, Add usage example
+//! The reasons to use this crate over another SymSpell implementation are:
+//! - You need to use a custom distance function
+//! - Startup time matters more than lookups-per-second
+//! - You care about resident memory footprint
 //! 
-//! GOATGOATGOAT, Write about different distance functions, give examples.  OCR errors, phonetic errors, 
-//! 
-//! **NOTE**: If your use-case can cope with a higher startup latency and you are ok with all of your keys and
-//! variants being resident in memory, then query performance will certainly be better using a solution
-//! built on Rust's native collections, such as this [symspell](https://crates.io/crates/symspell)
-//! crate on [crates.io](http://crates.io).
+//! ## Records
 //! 
 //! This crate manages records, each of which has a unique [RecordID].  Keys are used to perform fuzzy
 //! lookups but keys are not guaranteed to be unique. [Insert](Table::insert)ing the same key into a [Table] twice
 //! will result in two distinct records.
 //! 
-//! The included `geonames_megacities.txt` file is a stub for the `geonames_test`, designed to stress-test
+//! ## Usage Example
+//! 
+//! GOATGOATGOAT, Add usage example
+//! 
+//! ## Distance Functions
+//! 
+//! A distance function is any function that returns a scalar distance between two keys.  The smaller the
+//! distance, the closer the match.  Two identical keys must have a distance of [zero](num_traits::Zero).  The `fuzzy` methods
+//! in this crate, such as [lookup_fuzzy](Table::lookup_fuzzy), require a distance function to be supplied.
+//! 
+//! This crate includes a simple [Levenstein Distance](https://en.wikipedia.org/wiki/Levenshtein_distance) function
+//! called [edit_distance](Table::edit_distance).  However, you may often want to use a different function.
+//! 
+//! One reason to use a custom distance function is to account for expected variations. For example:
+//! a distance function that considers likely [OCR](https://en.wikipedia.org/wiki/Optical_character_recognition)
+//! errors might consider `ol` to be very close to `d`, `0` to be extremely close to `O`, and `A` to be
+//! somewhat near to `^`, while `#` would be much further from `,`
+//! 
+//! Another reason for a custom distance function is if your keys are not human-readable strings, in which
+//! case you may need a different interpretation of variances between keys.  For example DNA snippets could
+//! be used as keys.
+//! 
+//! Any distance function you choose must be compatible with SymSpell's delete-distance optimization.  In other
+//! words, you must be able to delete no more than `MAX_DELETES` characters from each of the record's
+//! key and the lookup key and arrive at identical key-variants.  If your distance function is incompatible
+//! with this property then the SymSpell optimization won't work for you and you should use a different fuzzy
+//! lookup technique and a different crate.
+//! 
+//! Distance functions may return any scalar type, so floating point distances will work.  However, the
+//! `MAX_DELETES` constant is an integer.  Records that can't be reached by deleting `MAX_DELETES` characters
+//! from both the record key and the lookup key will never be evaluated by the distance function and are
+//! conceptually "too far away".  Once the distance function has been evaluated, its return value is
+//! considered the authoritative distance and the delete distance is irrelevant.
+//! 
+//! ## Unicode Support
+//! 
+//! A [Table] may allow for unicode keys or not, depending on the value of the `UNICODE_KEYS` constant used
+//! when the Table was created.
+//! 
+//! If `UNICODE_KEYS` is `true`, keys may use unicode characters and multi-byte characters will still be
+//! considered as single characters for the purpose of deleting characters to create key variants.
+//! 
+//! If `UNICODE_KEYS` is `false`, keys are just strings of [u8] characters.
+//! This option has better performance.
+//! 
+//! ## Performance Characteristics
+//! 
+//! This crate is designed for large databases where startup time and resident memory footprint are significant
+//! considerations.  This create has been tested with 250,000 unique keys and about 10 million variants.
+//! 
+//! If your use-case can cope with a higher startup latency and you are ok with all of your keys and
+//! variants being loaded into memory, then query performance will certainly be better using a solution
+//! built on Rust's native collections, such as this [symspell](https://crates.io/crates/symspell)
+//! crate on [crates.io](http://crates.io).
+//! 
+//! **NOTE**: The included `geonames_megacities.txt` file is a stub for the `geonames_test`, designed to stress-test
 //! this crate.  The abriged file is included so the test will pass regardless, and to avoid bloating the
 //! download.  The content of `geonames_megacities.txt` was derived from data on [geonames.org](http://geonames.org),
 //! and licensed under a [Creative Commons Attribution 4.0 License](https://creativecommons.org/licenses/by/4.0/legalcode)
@@ -28,6 +78,8 @@
 
 use core::marker::PhantomData;
 use core::cmp::min;
+
+use num_traits::Zero;
 
 use serde::{Serialize, Deserialize};
 use bincode::Options;
@@ -39,10 +91,10 @@ use rocksdb::{DB, DBWithThreadMode, ColumnFamily, ColumnFamilyDescriptor, MergeO
 
 /// A collection containing records that may be searched by `key`
 /// 
-/// -`MAX_SEARCH_DISTANCE` is the number of deletes to store in the database for variants created
-/// by the SymSpell optimization.  If `MAX_SEARCH_DISTANCE` is too small, the variant will not be found
+/// -`MAX_DELETES` is the number of deletes to store in the database for variants created
+/// by the SymSpell optimization.  If `MAX_DELETES` is too small, the variant will not be found
 /// and therefore the `distance_function` will not have an opportunity to evaluate the match.  However,
-/// if `MAX_SEARCH_DISTANCE` is too large, it will hurt performance by evaluating too many candidates.
+/// if `MAX_DELETES` is too large, it will hurt performance by evaluating too many candidates.
 /// 
 /// Empirically, values near 2 seem to be good in most situations I have found.  I.e. 1 and 3 might be
 /// appropriate sometimes.  4 ends up exploding in most cases I've seen so the SymSpell logic may not
@@ -55,7 +107,7 @@ use rocksdb::{DB, DBWithThreadMode, ColumnFamily, ColumnFamilyDescriptor, MergeO
 /// This optimization is predicated on the idea that long key strings will not be very similar to each
 /// other.  For example the key *incomprehensibilities* will cause variants to be generated for
 ///  *incomprehe*, meaning that a search for *incomprehension* would find *incomprehensibilities*
-///  and evauate it with the `distance_function` even though it is further than `MAX_SEARCH_DISTANCE`.
+///  and evauate it with the `distance_function` even though it is further than `MAX_DELETES`.
 /// 
 /// In a dataset where many keys share a common prefix, or where keys are organized into a namespace by
 /// concatenating strings, this optimization will cause problems and you should either pass a high number
@@ -66,7 +118,7 @@ use rocksdb::{DB, DBWithThreadMode, ColumnFamily, ColumnFamilyDescriptor, MergeO
 /// performance cost, however, so passing `false` is more efficient if you plan to use regular ascii or
 /// any other kind of data as the table's keys.
 /// 
-pub struct Table<T : Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DISTANCE : usize, const MEANINGFUL_KEY_LEN : usize, const UNICODE_KEYS : bool> {
+pub struct Table<T : Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize, const UNICODE_KEYS : bool> {
     record_count : usize,
     db : DBWithThreadMode<rocksdb::SingleThreaded>,
     path : String,
@@ -98,7 +150,7 @@ impl RecordID {
 const RECORDS_CF_NAME : &str = "records";
 const VARIANTS_CF_NAME : &str = "variants";
 
-impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DISTANCE : usize, const MEANINGFUL_KEY_LEN : usize, const UNICODE_KEYS : bool>Table<T, MAX_SEARCH_DISTANCE, MEANINGFUL_KEY_LEN, UNICODE_KEYS> {
+impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize, const UNICODE_KEYS : bool>Table<T, MAX_DELETES, MEANINGFUL_KEY_LEN, UNICODE_KEYS> {
 
     /// Creates a new Table, backed by the database at the path provided
     /// 
@@ -306,7 +358,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
     }
 
     /// Returns an iterator over all possible candidates for a given fuzzy search key, based on
-    /// MAX_SEARCH_DISTANCE, without any distance function applied
+    /// MAX_DELETES, without any distance function applied
     fn fuzzy_candidates_iter<'a>(&'a self, raw_key : &'a [u8]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
 
         //Create all of the potential variants based off of the "meaningful" part of the key
@@ -335,7 +387,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
         self.fuzzy_candidates_iter(raw_key)
     }
 
-    fn lookup_fuzzy_internal<'a, D : 'static + Copy + PartialOrd, F : 'a + Fn(&[u8], &[u8])->D>(&'a self, raw_key : &'a [u8], distance_function : F, threshold : Option<D>) -> Result<impl Iterator<Item=(RecordID, D)> + 'a, String> {
+    fn lookup_fuzzy_internal<'a, D : 'static + Copy + Zero + PartialOrd, F : 'a + Fn(&[u8], &[u8])->D>(&'a self, raw_key : &'a [u8], distance_function : F, threshold : Option<D>) -> Result<impl Iterator<Item=(RecordID, D)> + 'a, String> {
         self.fuzzy_candidates_iter(raw_key).map(move |candidate_iter|
             candidate_iter.filter_map(move |record_id| {
 
@@ -357,7 +409,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
         )
     }
 
-    fn lookup_best_internal<D : 'static + Copy + PartialOrd, F : Fn(&[u8], &[u8])->D>(&self, raw_key : &[u8], distance_function : F) -> Result<RecordID, String> {
+    fn lookup_best_internal<D : 'static + Copy + Zero + PartialOrd, F : Fn(&[u8], &[u8])->D>(&self, raw_key : &[u8], distance_function : F) -> Result<RecordID, String> {
         let mut result_iter = self.lookup_fuzzy_internal(raw_key, distance_function, None)?;
         
         if let Some(first_result) = result_iter.next() {
@@ -545,7 +597,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
     
                 if !variants_set.contains(&variant) {
     
-                    if edit_distance < MAX_SEARCH_DISTANCE {
+                    if edit_distance < MAX_DELETES {
                         Self::variants_recursive(&variant, edit_distance, variants_set);
                     }
     
@@ -660,7 +712,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
     }
 }
 
-impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DISTANCE : usize, const MEANINGFUL_KEY_LEN : usize>Table<T, MAX_SEARCH_DISTANCE, MEANINGFUL_KEY_LEN, true> {
+impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize>Table<T, MAX_DELETES, MEANINGFUL_KEY_LEN, true> {
 
     /// Inserts a new key-value pair into the table and returns the RecordID of the new record
     /// 
@@ -710,7 +762,7 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
         self.lookup_exact_internal(key.as_bytes())
     }
 
-    /// Locates all records in the table with a key that is within a deletion distance of MAX_SEARCH_DISTANCE of
+    /// Locates all records in the table with a key that is within a deletion distance of MAX_DELETES of
     /// the key supplied, based on the SymSpell algorithm.
     /// 
     /// This function underlies all fuzzy lookups, and does no further filtering based on any distance function.
@@ -726,27 +778,29 @@ impl <T : 'static + Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DI
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_fuzzy<'a, D : 'static + Copy + PartialOrd, F : 'a + Fn(&[u8], &[u8])->D>(&'a self, key : &'a str, distance_function : F, threshold : D) -> Result<impl Iterator<Item=(RecordID, D)> + 'a, String> {
+    pub fn lookup_fuzzy<'a, D : 'static + Copy + Zero + PartialOrd, F : 'a + Fn(&[u8], &[u8])->D>(&'a self, key : &'a str, distance_function : F, threshold : D) -> Result<impl Iterator<Item=(RecordID, D)> + 'a, String> {
         self.lookup_fuzzy_internal(key.as_bytes(), distance_function, Some(threshold))
     }
 
     /// Locates the record in the table for which the supplied `distance_function` evaluates to the lowest value
     /// when comparing the record's key with the supplied `key`.
     /// 
-    /// If no matching record is found within the table's `MAX_SEARCH_DISTANCE`, this method will return an error.
+    /// If no matching record is found within the table's `MAX_DELETES`, this method will return an error.
     /// 
     /// NOTE: If two or more results have the same returned distance value and that is the smallest value, the
     /// implementation does not specify which result will be returned.
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_best<D : 'static + Copy + PartialOrd, F : Fn(&[u8], &[u8])->D>(&self, key : &str, distance_function : F) -> Result<RecordID, String> {
+    pub fn lookup_best<D : 'static + Copy + Zero + PartialOrd, F : Fn(&[u8], &[u8])->D>(&self, key : &str, distance_function : F) -> Result<RecordID, String> {
         self.lookup_best_internal(key.as_bytes(), distance_function)
     }
-
 }
 
-impl <T : Serialize + serde::de::DeserializeOwned, const MAX_SEARCH_DISTANCE : usize, const MEANINGFUL_KEY_LEN : usize, const UNICODE_KEYS : bool>Drop for Table<T, MAX_SEARCH_DISTANCE, MEANINGFUL_KEY_LEN, UNICODE_KEYS> {
+// GOATGOAT, Provide a unicode=false implementation
+
+
+impl <T : Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize, const UNICODE_KEYS : bool>Drop for Table<T, MAX_DELETES, MEANINGFUL_KEY_LEN, UNICODE_KEYS> {
     fn drop(&mut self) {
         //Close down Rocks
         self.db.flush().unwrap();
