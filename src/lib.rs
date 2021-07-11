@@ -48,6 +48,8 @@
 //! assert_eq!(val, "Suiyoubi");
 //! ```
 //! 
+//! Additional usage examples can be found in the tests, located at the bottom of the `src/lib.rs` file.
+//! 
 //! ## Distance Functions
 //! 
 //! A distance function is any function that returns a scalar distance between two keys.  The smaller the
@@ -1339,8 +1341,3 @@ mod tests {
         assert_eq!(results[0], one);
     }
 }
-
-//GOATGOATGOAT
-//Add ReadME
-//Specify specific versions of dependencies in Cargo.toml
-//

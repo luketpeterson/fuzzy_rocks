@@ -7,11 +7,11 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-num-traits = "*"
-derive_more = "*"
-rocksdb = "*"
-serde = { version = "*", features = ["derive"] }
-bincode = "*"
+num-traits = "0.2.14"
+derive_more = "0.99.14"
+rocksdb = "0.16.0"
+serde = { version = "1.0.126", features = ["derive"] }
+bincode = "1.3.3"
 
 [dev-dependencies]
-csv = "*"
+csv = "1.1.6"
