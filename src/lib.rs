@@ -43,9 +43,8 @@
 //! assert!(results.contains(&(thu, 2))); //Thursday -> Tuesday with 2 edits
 //! 
 //! //Retrieve the key and value from a record
-//! let (key, val) = table.get_record(wed).unwrap();
-//! assert_eq!(key, "Wednesday");
-//! assert_eq!(val, "Suiyoubi");
+//! assert_eq!(table.get_one_key(wed).unwrap(), "Wednesday");
+//! assert_eq!(table.get_value(wed).unwrap(), "Suiyoubi");
 //! ```
 //! 
 //! Additional usage examples can be found in the tests, located at the bottom of the `src/lib.rs` file.
@@ -160,21 +159,6 @@ pub struct Table<ValueT : Serialize + serde::de::DeserializeOwned, const MAX_DEL
     phantom: PhantomData<ValueT>,
 }
 
-//NOTE: We have two flavors of the Record struct so we don't need to make an extra copy of the data when
-//serializing, but I'm not sure how to avoid the copy when deserializing
-#[derive(Serialize)]
-struct RecordSer<'a, ValueT : Serialize, const UNICODE_KEYS : bool> {
-    key : &'a [u8],
-    value : Option<&'a ValueT>
-}
-
-#[derive(Deserialize)]
-struct RecordDeser<ValueT : serde::de::DeserializeOwned, const UNICODE_KEYS : bool> {
-    key : Box<[u8]>, //NOTE: we could avoid this secondary allocation with a maximum_key_length, but currently we don't have one
-    #[serde(bound(deserialize = "ValueT: serde::de::DeserializeOwned"))]
-    value : Option<ValueT>
-}
-
 /// A unique identifier for a record within a [Table]
 #[derive(Copy, Debug, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, derive_more::Display, Serialize, Deserialize)]
 pub struct RecordID(usize);
@@ -182,7 +166,8 @@ impl RecordID {
     pub const NULL : RecordID = RecordID(usize::MAX);
 }
 
-const RECORDS_CF_NAME : &str = "records";
+const KEYS_CF_NAME : &str = "keys";
+const VALUES_CF_NAME : &str = "values";
 const VARIANTS_CF_NAME : &str = "variants";
 
 impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize, const UNICODE_KEYS : bool>Table<ValueT, MAX_DELETES, MEANINGFUL_KEY_LEN, UNICODE_KEYS> {
@@ -197,8 +182,9 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// unwrapped RocksDB error.
     pub fn new(path : &str) -> Result<Self, String> {
 
-        //Configure the "records" column family
-        let records_cf = ColumnFamilyDescriptor::new(RECORDS_CF_NAME, rocksdb::Options::default());
+        //Configure the "keys" and "values" column families
+        let keys_cf = ColumnFamilyDescriptor::new(KEYS_CF_NAME, rocksdb::Options::default());
+        let values_cf = ColumnFamilyDescriptor::new(VALUES_CF_NAME, rocksdb::Options::default());
 
         //Configure the "variants" column family
         let mut variants_opts = rocksdb::Options::default();
@@ -212,11 +198,11 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         db_opts.create_if_missing(true);
 
         //Open the database
-        let db = DB::open_cf_descriptors(&db_opts, path, vec![records_cf, variants_cf])?;
+        let db = DB::open_cf_descriptors(&db_opts, path, vec![keys_cf, values_cf, variants_cf])?;
 
-        //Find the maximum RecordID, by probing the keys in the "records" column family
-        let records_cf_handle = db.cf_handle(RECORDS_CF_NAME).unwrap();
-        let record_count = probe_for_max_sequential_key(&db, records_cf_handle, 255)?;
+        //Find the maximum RecordID, by probing the keys in the "keys" column family
+        let keys_cf_handle = db.cf_handle(KEYS_CF_NAME).unwrap();
+        let record_count = probe_for_max_sequential_key(&db, keys_cf_handle, 255)?;
 
         Ok(Self {
             record_count,
@@ -232,12 +218,14 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     pub fn reset(&mut self) -> Result<(), String> {
         
         //Drop both the "records" and the "variants" column families
-        self.db.drop_cf(RECORDS_CF_NAME)?;
+        self.db.drop_cf(KEYS_CF_NAME)?;
+        self.db.drop_cf(VALUES_CF_NAME)?;
         self.db.drop_cf(VARIANTS_CF_NAME)?;
 
-        //Recreate the "records" column family
-        self.db.create_cf(RECORDS_CF_NAME, &rocksdb::Options::default())?;
-
+        //Recreate the "keys" and "values" column families
+        self.db.create_cf(KEYS_CF_NAME, &rocksdb::Options::default())?;
+        self.db.create_cf(VALUES_CF_NAME, &rocksdb::Options::default())?;
+        
         //Recreate the "variants" column family
         let mut variants_opts = rocksdb::Options::default();
         variants_opts.create_if_missing(true);
@@ -249,23 +237,28 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         Ok(())
     }
 
-    /// Returns `true` if a [RecordID] **can** be used to refer to a record in a Table, otherwise returns
-    /// `false`.  A deleted record will still have a valid [RecordID].
-    /// 
-    /// Use this function instead of comparing a [RecordID] to [RecordID::NULL].
-    pub fn record_id_is_valid(&self, record_id : RecordID) -> bool {
-        record_id.0 < self.record_count
-    }
-
     /// Deletes a record from the Table.
     /// 
     /// A deleted record cannot be accessed or otherwise found, but the RecordID may be reassigned
     /// using [Table::replace].
-    pub fn delete(&mut self, record_id : RecordID) -> Result<ValueT, String> {
+    pub fn delete(&mut self, record_id : RecordID) -> Result<(), String> {
 
-        //Get the key for the record we're removing, so we can compute all the variants
-        let (raw_key, value) = self.get_record_internal(record_id)?;
-        let variants = Self::variants(&raw_key);
+        self.delete_keys_internal(record_id)?;
+        self.delete_value_internal(record_id)
+    }
+
+    /// Deletes the keys belonging to a record, and all associated variants
+    /// 
+    /// Leaves the record in a half-composed state, so should only be called as part of another
+    /// operation.
+    fn delete_keys_internal(&mut self, record_id : RecordID) -> Result<(), String> {
+
+        //Get all the keys for the record we're removing, so we can compute all the variants
+        let raw_keys_iter = self.get_keys_internal(record_id)?;
+        let mut variants = HashSet::new();
+        for raw_key in raw_keys_iter {
+            variants = Self::variants(&raw_key, Some(variants));
+        }
 
         //Loop over each variant, and remove the record_id from its associated variant entry in
         // the database, and remove the variant entry if it only referenced the record we're removing
@@ -294,76 +287,111 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
             }
         }
 
-        //Now replace the record with an empty sentinel in the records table
+        //Now replace the record with an empty sentinel vec in the keys table
         //NOTE: We replace the record rather than delete it because we assume there are no gaps in the
         // RecordIDs, when assigning new a RecordID
-        let records_cf_handle = self.db.cf_handle(RECORDS_CF_NAME).unwrap();
-        let empty_record = RecordSer::<ValueT, UNICODE_KEYS>{
-            key : b"",
-            value : None
-        };
-        let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
-        let record_bytes = record_coder.serialize(&empty_record).unwrap();
-        self.db.put_cf(records_cf_handle, usize::to_le_bytes(record_id.0), record_bytes)?;
+        self.put_keys_internal(record_id, &[])?;
 
-        Ok(value)
+        Ok(())
     }
 
-    fn replace_internal(&mut self, record_id : RecordID, raw_key : &[u8], value : &ValueT) -> Result<(), String> {
-        if self.record_id_is_valid(record_id) {
+    //GOATGOATGOAT, Should have a fast path that skips all value setting stuff is sizeof(ValueT) == 0
 
-            let existing_record_result = self.get_record_internal(record_id);
-
-            //NOTE: There are 3 paths through this function once we validate we have a valid record_id
-            //1. The existing record has been deleted, in which case we just insert a new record
-            //2. The existing record exists and the keys match, in which case we just replace the value
-            //3. The existing record exists and the keys don't match, in which case we must delete the existing record and insert a new record
-
-            if let Ok((existing_key, _existing_val)) = existing_record_result {
-                if *existing_key == *raw_key {
-                    //Case 2
-                    self.put_record_internal(record_id, raw_key, value)?;
-                } else {
-                    //Case 3
-                    self.delete(record_id)?;
-                    self.insert_internal(raw_key, value, Some(record_id))?;
-                }
-            } else {
-                //Case 1
-                self.insert_internal(raw_key, value, Some(record_id))?;
-            }
-            
-            Ok(())
-        } else {
-            Err("Invalid record_id".to_string())
-        }
-    }
-
-    /// Creates the records structure in the records table
+    /// Creates entries in the keys table
     /// If we are updating an old record, we will overwrite it.
     /// 
     /// NOTE: This function will NOT update any variants used to locate the key
-    fn put_record_internal(&mut self, record_id : RecordID, raw_key : &[u8], value : &ValueT) -> Result<(), String>{
+    fn put_keys_internal(&mut self, record_id : RecordID, raw_keys : &[&[u8]]) -> Result<(), String> {
         
-        //Create the records struct, serialize it, and put in into the records table.
-        let records_cf_handle = self.db.cf_handle(RECORDS_CF_NAME).unwrap();
-        let record = RecordSer::<ValueT, UNICODE_KEYS>{
-            key : raw_key,
-            value : Some(value)
-        };
+        //Create the keys vector, serialize it, and put in into the keys table.
+        let keys_cf_handle = self.db.cf_handle(KEYS_CF_NAME).unwrap();
         let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
-        let record_bytes = record_coder.serialize(&record).unwrap();
-        self.db.put_cf(records_cf_handle, usize::to_le_bytes(record_id.0), record_bytes)?;
+        let keys_bytes = record_coder.serialize(raw_keys).unwrap();
+        self.db.put_cf(keys_cf_handle, usize::to_le_bytes(record_id.0), keys_bytes)?;
 
         Ok(())
+    }
+
+    /// Adds the RecordID to each variant of all supplied keys
+    fn put_variants_internal(&mut self, record_id : RecordID, raw_keys : &[&[u8]]) -> Result<(), String> {
+
+        //Now compute all the variants so we'll be able to add an entry to each one
+        let mut variants = HashSet::new();
+        for raw_key in raw_keys {
+            variants = Self::variants(raw_key, Some(variants));
+        }
+
+        //Add the record_id to each variant
+        let variants_cf_handle = self.db.cf_handle(VARIANTS_CF_NAME).unwrap();
+        for variant in variants {
+            //TODO: Benchmark using merge_cf() against using a combination of get_pinned_cf() and put_cf()
+            let val_bytes = Self::new_variant_vec(record_id);
+            self.db.merge_cf(variants_cf_handle, variant, val_bytes)?;
+        }
+
+        Ok(())
+    }
+
+    /// Replaces all of the keys in a record with the supplied keys
+    ///
+    /// NOTE: This function will NOT update any variants used to locate the key
+    fn replace_keys_internal(&mut self, record_id : RecordID, raw_keys : &[&[u8]]) -> Result<(), String> {
+
+        self.delete_keys_internal(record_id)?;
+        self.put_variants_internal(record_id, raw_keys)?;
+        self.put_keys_internal(record_id, raw_keys)
+    }
+
+    /// Deletes a record's value in the values table
+    /// 
+    /// This should only be called as part of another operation as it leaves the record in an
+    /// inconsistent state
+    fn delete_value_internal(&mut self, record_id : RecordID) -> Result<(), String> {
+
+        let value_cf_handle = self.db.cf_handle(VALUES_CF_NAME).unwrap();
+        self.db.delete_cf(value_cf_handle, usize::to_le_bytes(record_id.0))?;
+
+        Ok(())
+    }
+
+    /// Creates entries in the values table
+    /// If we are updating an old record, we will overwrite it.
+    /// 
+    /// NOTE: This function will NOT update any variants used to locate the key
+    fn put_value_internal(&mut self, record_id : RecordID, value : &ValueT) -> Result<(), String> {
+        
+        //Serialize the value and put it in the values table.
+        let value_cf_handle = self.db.cf_handle(VALUES_CF_NAME).unwrap();
+        let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
+        let value_bytes = record_coder.serialize(value).unwrap();
+        self.db.put_cf(value_cf_handle, usize::to_le_bytes(record_id.0), value_bytes)?;
+
+        Ok(())
+    }
+
+    /// Replaces a record's value with the supplied value.  Returns the value that was replaced
+    /// 
+    /// The supplied `record_id` must references an existing record that has not been deleted.
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn replace_value(&mut self, record_id : RecordID, value : &ValueT) -> Result<ValueT, String> {
+
+        let old_value = self.get_value(record_id)?;
+
+        self.put_value_internal(record_id, value)?;
+
+        Ok(old_value)
     }
 
     /// Inserts a record into the Table, called by insert(), which is implemented differently depending
     /// on the UNICODE_KEYS constant
     /// 
+    /// If a RecordID is supplied, it is assumed that it represents a record that has been deleted earlier
+    /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    fn insert_internal(&mut self, raw_key : &[u8], value : &ValueT, supplied_id : Option<RecordID>) -> Result<RecordID, String> {
+    fn insert_internal(&mut self, raw_keys : &[&[u8]], value : &ValueT, supplied_id : Option<RecordID>) -> Result<RecordID, String> {
 
         let new_record_id = match supplied_id {
             None => {
@@ -375,19 +403,10 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
             Some(record_id) => record_id
         };
 
-        //Put the record into the records table
-        self.put_record_internal(new_record_id, raw_key, value)?;
-
-        //Now compute all the variants so we'll be able to add an entry to each one
-        let variants = Self::variants(raw_key);
-
-        //Add the new_record_id to each variant
-        let variants_cf_handle = self.db.cf_handle(VARIANTS_CF_NAME).unwrap();
-        for variant in variants {
-            //TODO: Benchmark using merge_cf() against using a combination of get_pinned_cf() and put_cf()
-            let val_bytes = Self::new_variant_vec(new_record_id);
-            self.db.merge_cf(variants_cf_handle, variant, val_bytes)?;
-        }
+        //Put the keys, variants and value into the respective tables
+        self.put_variants_internal(new_record_id, raw_keys)?;
+        self.put_keys_internal(new_record_id, raw_keys)?;
+        self.put_value_internal(new_record_id, value)?;
 
         Ok(new_record_id)
     }
@@ -397,7 +416,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     fn fuzzy_candidates_iter<'a>(&'a self, raw_key : &'a [u8]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
 
         //Create all of the potential variants based off of the "meaningful" part of the key
-        let variants = Self::variants(raw_key);
+        let variants = Self::variants(raw_key, None);
 
         //Create a new HashSet to hold all of the RecordIDs that we find
         let mut result_set = HashSet::new(); //TODO, may want to allocate this with a non-zero capacity
@@ -426,19 +445,29 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         self.fuzzy_candidates_iter(raw_key).map(move |candidate_iter|
             candidate_iter.filter_map(move |record_id| {
 
-                //Check the record's key with the distance function
-                let (record_key, _val) = self.get_record_internal(record_id).unwrap();
-                let distance = distance_function(&record_key, raw_key);
+                //QUESTION: Should we have an alternate fast path that only evaluates until we find
+                // any distance smaller than threshold?  It would mean we couldn't return a reliable
+                // distance but would save us evaluating distance for potentially many keys
+                
+                //Check the record's keys with the distance function and find the smallest distance
+                let mut record_keys_iter = self.get_keys_internal(record_id).unwrap().into_iter();
+                let mut smallest_distance = distance_function(&record_keys_iter.next().unwrap()[..], raw_key); //If we have a zero-element keys array, it's a bug elsewhere
+                for record_key in record_keys_iter {
+                    let distance = distance_function(&record_key, raw_key);
+                    if distance < smallest_distance {
+                        smallest_distance = distance;
+                    }
+                }
 
                 match threshold {
                     Some(threshold) => {
-                        if distance <= threshold{
-                            Some((record_id, distance))
+                        if smallest_distance <= threshold{
+                            Some((record_id, smallest_distance))
                         } else {
                             None
                         }        
                     }
-                    None => Some((record_id, distance))
+                    None => Some((record_id, smallest_distance))
                 }
             })
         )
@@ -468,7 +497,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
 
         let meaningful_key = Self::meaningful_key_substring(raw_key);
 
-        let records_cf_handle = self.db.cf_handle(RECORDS_CF_NAME).unwrap();
+        let keys_cf_handle = self.db.cf_handle(KEYS_CF_NAME).unwrap();
         let variants_cf_handle = self.db.cf_handle(VARIANTS_CF_NAME).unwrap();
         if let Some(variant_vec_bytes) = self.db.get_pinned_cf(variants_cf_handle, meaningful_key)? {
 
@@ -476,17 +505,15 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
                 .filter_map(|record_id_bytes| {
                     
                     // Return only the RecordIDs for records if their keys match the key we are looking up
-                    if let Some(record_bytes) = self.db.get_pinned_cf(records_cf_handle, record_id_bytes).unwrap() {
+                    if let Some(key_vec_bytes) = self.db.get_pinned_cf(keys_cf_handle, record_id_bytes).unwrap() {
 
-                        //Get the key from the record we just looked up in the DB
-                        //NOTE: Fully decoding the record is a lot of unnecessary work.  It's probably faster just to
-                        // peek inside it.
-                        // let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
-                        // let record : RecordDeser::<T, UNICODE_KEYS> = record_coder.deserialize(&record_bytes).unwrap();
-                        let record_key = bincode_string_varint(&record_bytes as &[u8]);
+                        //Decode the record's keys
+                        let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
+                        let record_keys_vec : Vec<Vec<u8>> = record_coder.deserialize(&key_vec_bytes).unwrap();
     
                         //If the full key in the DB matches the key we're checking return the RecordID
-                        if *record_key == *raw_key {
+                        //GOATGOATGOAT, Don't want to make a copy of the key
+                        if record_keys_vec.contains(&raw_key.to_owned()) {
                             Some(RecordID(usize::from_le_bytes(record_id_bytes.try_into().unwrap())))
                         } else {
                             None
@@ -519,37 +546,34 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// unwrapped RocksDB error.
     pub fn get_value(&self, record_id : RecordID) -> Result<ValueT, String> {
 
-        //Get the Record structure by deserializing the bytes from the db
-        let records_cf_handle = self.db.cf_handle(RECORDS_CF_NAME).unwrap();
-        if let Some(record_bytes) = self.db.get_pinned_cf(records_cf_handle, record_id.0.to_le_bytes())? {
+        //Get the value object by deserializing the bytes from the db
+        let values_cf_handle = self.db.cf_handle(VALUES_CF_NAME).unwrap();
+        if let Some(value_bytes) = self.db.get_pinned_cf(values_cf_handle, record_id.0.to_le_bytes())? {
             let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
-            let record : RecordDeser::<ValueT, UNICODE_KEYS> = record_coder.deserialize(&record_bytes).unwrap();
+            let value : ValueT = record_coder.deserialize(&value_bytes).unwrap();
 
-            match record.value {
-                Some(value) => Ok(value),
-                None => Err("Invalid record_id".to_string())
-            }
+            Ok(value)
         } else {
             Err("Invalid record_id".to_string())
         }
     }
 
-    /// Returns the key and value at a specified record.  This function will be faster than doing a
-    /// fuzzy lookup
+    /// Returns the keys associated with a specified record
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    fn get_record_internal(&self, record_id : RecordID) -> Result<(Box<[u8]>, ValueT), String> {
+    fn get_keys_internal(&self, record_id : RecordID) -> Result<impl Iterator<Item=Box<[u8]>>, String> {
 
-        //Get the Record structure by deserializing the bytes from the db
-        let records_cf_handle = self.db.cf_handle(RECORDS_CF_NAME).unwrap();
-        if let Some(record_bytes) = self.db.get_pinned_cf(records_cf_handle, record_id.0.to_le_bytes())? {
+        //Get the keys vec by deserializing the bytes from the db
+        let keys_cf_handle = self.db.cf_handle(KEYS_CF_NAME).unwrap();
+        if let Some(keys_vec_bytes) = self.db.get_pinned_cf(keys_cf_handle, record_id.0.to_le_bytes())? {
             let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
-            let record : RecordDeser::<ValueT, UNICODE_KEYS> = record_coder.deserialize(&record_bytes).unwrap();
+            let keys_vec : Vec<Box<[u8]>> = record_coder.deserialize(&keys_vec_bytes).unwrap();
 
-            match record.value {
-                Some(value) => Ok((record.key, value)),
-                None => Err("Invalid record_id".to_string())
+            if keys_vec.len() > 0 {
+                Ok(keys_vec.into_iter())
+            } else {
+                Err("Invalid record_id".to_string())
             }
         } else {
             Err("Invalid record_id".to_string())
@@ -578,20 +602,20 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         let vec_coder = bincode::DefaultOptions::new().with_fixint_encoding().with_little_endian();
 
         //Deserialize the existing database entry into a vec of RecordIDs
+        //NOTE: we're actually using a HashSet because we don't want any duplicates
         let mut variant_vec = if let Some(existing_bytes) = existing_val {
-            let new_vec : Vec<RecordID> = vec_coder.deserialize(existing_bytes).unwrap();
+            let new_vec : HashSet<RecordID> = vec_coder.deserialize(existing_bytes).unwrap();
             new_vec
         } else {
-
             //TODO: Remove status println!()
             // println!("MERGE WITH NONE!!");
-            Vec::with_capacity(operands.size_hint().0)
+            HashSet::with_capacity(operands.size_hint().0)
         };
 
         //Add the new RecordID(s)
         for op in operands {
             //Deserialize the vec on the operand, and merge its entries into the existing vec
-            let operand_vec : Vec<RecordID> = vec_coder.deserialize(op).unwrap();
+            let operand_vec : HashSet<RecordID> = vec_coder.deserialize(op).unwrap();
             variant_vec.extend(operand_vec);
         }
 
@@ -609,10 +633,13 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     }
 
     // Returns all of the variants of a key that we will put into the variants database
-    fn variants(key: &[u8]) -> HashSet<Vec<u8>> {
+    fn variants(key: &[u8], existing_variants : Option<HashSet<Vec<u8>>>) -> HashSet<Vec<u8>> {
 
-        let mut variants_set : HashSet<Vec<u8>> = HashSet::new();
-        
+        let mut variants_set : HashSet<Vec<u8>> = match existing_variants {
+            Some(existing_variants) => existing_variants,
+            None => HashSet::new()
+        };
+
         let meaningful_key = Self::meaningful_key_substring(key);
 
         if 0 < MAX_DELETES {
@@ -777,31 +804,37 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn insert(&mut self, key : &str, value : &ValueT) -> Result<RecordID, String> {
-        self.insert_internal(key.as_bytes(), value, None)
+        self.insert_internal(&[key.as_bytes()], value, None)
     }
 
-    /// Replaces a record in the Table with the supplied key-value pair
+    /// Replaces a record's keys with the supplied keys
     /// 
-    /// If the supplied `record_id` references an existing record, the existing record contents will
-    /// be deleted.  If the supplied `record_id` references a record that has been deleted, this
-    /// function will succeed, but is the `record_id` is invalid then this function will return an
-    /// error.
-    /// 
-    /// If the key exactly matches the existing record's key, this function will be more efficient
-    /// as it will not need to update the stored variants.
+    /// The supplied `record_id` must references an existing record that has not been deleted.
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn replace(&mut self, record_id : RecordID, key : &str, value : &ValueT) -> Result<(), String> {
-        self.replace_internal(record_id, key.as_bytes(), value)
+    pub fn replace_keys(&mut self, record_id : RecordID, keys : &[&str]) -> Result<(), String> {
+        let raw_keys : Vec<&[u8]> = keys.into_iter().map(|key| key.as_bytes()).collect();
+        self.replace_keys_internal(record_id, &raw_keys[..])
     }
 
-    /// Returns the key and value associated with the specified record
+    /// Returns an iterator over all of the key associated with the specified record
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn get_record(&self, record_id : RecordID) -> Result<(String, ValueT), String> {
-        self.get_record_internal(record_id).map(|(key, val)| (String::from_utf8(key.to_vec()).unwrap(), val))
+    pub fn get_keys(&self, record_id : RecordID) -> Result<impl Iterator<Item=String>, String> {
+        Ok(self.get_keys_internal(record_id)?.map(|key| String::from_utf8(key.to_vec()).unwrap())) //GOATGOAT, we can rely on this being valid and therefore use unchecked
+    }
+
+    /// Returns one key associated with the specified record.  If the record has more than one key
+    /// then which key is unspecified
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn get_one_key(&self, record_id : RecordID) -> Result<String, String> {
+        //TODO: Perhaps we can speed this up in the future by avoiding deserializing all keys
+        let first_key = self.get_keys_internal(record_id)?.next().unwrap();
+        Ok(String::from_utf8(first_key.to_vec()).unwrap()) //GOATGOAT, we can rely on this being valid and therefore use unchecked
     }
 
     /// Locates all records in the table with keys that precisely match the key supplied
@@ -862,31 +895,35 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn insert(&mut self, key : &[u8], value : &ValueT) -> Result<RecordID, String> {
-        self.insert_internal(key, value, None)
+        self.insert_internal(&[key], value, None)
     }
 
-    /// Replaces a record in the Table with the supplied key-value pair
+    /// Replaces a record's keys with the supplied keys
     /// 
-    /// If the supplied `record_id` references an existing record, the existing record contents will
-    /// be deleted.  If the supplied `record_id` references a record that has been deleted, this
-    /// function will succeed, but is the `record_id` is invalid then this function will return an
-    /// error.
-    /// 
-    /// If the key exactly matches the existing record's key, this function will be more efficient
-    /// as it will not need to update the stored variants.
+    /// The supplied `record_id` must references an existing record that has not been deleted.
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn replace(&mut self, record_id : RecordID, key : &[u8], value : &ValueT) -> Result<(), String> {
-        self.replace_internal(record_id, key, value)
+    pub fn replace_keys(&mut self, record_id : RecordID, keys : &[&[u8]]) -> Result<(), String> {
+        self.replace_keys_internal(record_id, keys)
     }
 
-    /// Returns the key and value associated with the specified record
+    /// Returns an iterator over all of the key associated with the specified record
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn get_record(&self, record_id : RecordID) -> Result<(Box<[u8]>, ValueT), String> {
-        self.get_record_internal(record_id)
+    pub fn get_keys(&self, record_id : RecordID) -> Result<impl Iterator<Item=Box<[u8]>>, String> {
+        self.get_keys_internal(record_id)
+    }
+
+    /// Returns one key associated with the specified record.  If the record has more than one key
+    /// then which key is unspecified
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn get_one_key(&self, record_id : RecordID) -> Result<Box<[u8]>, String> {
+        //TODO: Perhaps we can speed this up in the future by avoiding deserializing all keys
+        Ok(self.get_keys_internal(record_id)?.next().unwrap())
     }
 
     /// Locates all records in the table with keys that precisely match the key supplied
@@ -1092,19 +1129,20 @@ fn bincode_u64_le_varint(buf : &[u8], num_bytes : &mut usize) -> u64 {
     }
 }
 
-/// Returns a slice representing the characters of a String that has been encoded with bincode, using
-/// [VarintEncoding](bincode::config::VarintEncoding) and [LittleEndian](bincode::config::LittleEndian) byte order.
-fn bincode_string_varint(buf : &[u8]) -> &[u8] {
+//TODO: Currently Unused.  Delete
+// /// Returns a slice representing the characters of a String that has been encoded with bincode, using
+// /// [VarintEncoding](bincode::config::VarintEncoding) and [LittleEndian](bincode::config::LittleEndian) byte order.
+// fn bincode_string_varint(buf : &[u8]) -> &[u8] {
 
-    //Interpret the length
-    let mut skip_bytes = 0;
-    let string_len = bincode_u64_le_varint(buf, &mut skip_bytes);
+//     //Interpret the length
+//     let mut skip_bytes = 0;
+//     let string_len = bincode_u64_le_varint(buf, &mut skip_bytes);
 
-    //Split the slice to grab the string
-    let (_len_chars, remainder) = buf.split_at(skip_bytes);
-    let (string_slice, _remainder) = remainder.split_at(string_len as usize);
-    string_slice
-}
+//     //Split the slice to grab the string
+//     let (_len_chars, remainder) = buf.split_at(skip_bytes);
+//     let (string_slice, _remainder) = remainder.split_at(string_len as usize);
+//     string_slice
+// }
 
 #[cfg(test)]
 mod tests {
@@ -1196,8 +1234,8 @@ mod tests {
         assert_eq!(record_id.0 + 1, tsv_record_count);
 
         //Confirm we can find a known city (London)
-        let london_results : Vec<(String, i32)> = table.lookup_exact("london").unwrap().map(|record_id| table.get_record(record_id).unwrap()).collect();
-        assert!(london_results.contains(&("london".to_string(), 2643743)));
+        let london_results : Vec<i32> = table.lookup_exact("london").unwrap().map(|record_id| table.get_value(record_id).unwrap()).collect();
+        assert!(london_results.contains(&2643743)); //2643743 is the geonames_id of "London"
 
         //Close RocksDB connection by dropping the table object
         drop(table);
@@ -1205,8 +1243,8 @@ mod tests {
 
         //Reopen the table and confirm that "London" is still there
         let table = Table::<i32, 2, 12, true>::new("geonames.rocks").unwrap();
-        let london_results : Vec<(String, i32)> = table.lookup_exact("london").unwrap().map(|record_id| table.get_record(record_id).unwrap()).collect();
-        assert!(london_results.contains(&("london".to_string(), 2643743)));
+        let london_results : Vec<i32> = table.lookup_exact("london").unwrap().map(|record_id| table.get_value(record_id).unwrap()).collect();
+        assert!(london_results.contains(&2643743)); //2643743 is the geonames_id of "London"
     }
 
     #[test]
@@ -1226,13 +1264,13 @@ mod tests {
         let mon = table.insert("Monday", &"Getsuyoubi".to_string()).unwrap();
 
         //Test lookup_exact
-        let results : Vec<(String, String)> = table.lookup_exact("Friday").unwrap().map(|record_id| table.get_record(record_id).unwrap()).collect();
+        let results : Vec<(String, String)> = table.lookup_exact("Friday").unwrap().map(|record_id| (table.get_one_key(record_id).unwrap(), table.get_value(record_id).unwrap())).collect();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "Friday");
         assert_eq!(results[0].1, "Kinyoubi");
 
         //Test lookup_exact, with a query that should provide no results
-        let results : Vec<(String, String)> = table.lookup_exact("friday").unwrap().map(|record_id| table.get_record(record_id).unwrap()).collect();
+        let results : Vec<RecordID> = table.lookup_exact("friday").unwrap().collect();
         assert_eq!(results.len(), 0);
 
         //Test lookup_best, using the supplied edit_distance function
@@ -1247,7 +1285,8 @@ mod tests {
         //In this case, we should only get one match within edit-distance 2
         let results : Vec<(String, String, u64)> = table.lookup_fuzzy("Saturday", table.default_distance_func(), 2)
             .unwrap().map(|(record_id, distance)| {
-                let (key, val) = table.get_record(record_id).unwrap();
+                let key = table.get_one_key(record_id).unwrap();
+                let val = table.get_value(record_id).unwrap();
                 (key, val, distance)
             }).collect();
         assert_eq!(results.len(), 1);
@@ -1258,7 +1297,8 @@ mod tests {
         //Test lookup_fuzzy with a perfect match, but where we'll hit another imperfect match as well
         let results : Vec<(String, String, u64)> = table.lookup_fuzzy("Tuesday", table.default_distance_func(), 2)
             .unwrap().map(|(record_id, distance)| {
-                let (key, val) = table.get_record(record_id).unwrap();
+                let key = table.get_one_key(record_id).unwrap();
+                let val = table.get_value(record_id).unwrap();
                 (key, val, distance)
             }).collect();
         assert_eq!(results.len(), 2);
@@ -1277,7 +1317,7 @@ mod tests {
 
         //Test deleting a record, and ensure we can't access it or any trace of its variants
         table.delete(tue).unwrap();
-        assert!(table.get_record(tue).is_err());
+        assert!(table.get_one_key(tue).is_err());
 
         //Since "Tuesday" had one variant overlap with "Thursday", i.e. "Tusday", make sure we now find
         // "Thursday" when we attempt to lookup "Tuesday"
@@ -1286,13 +1326,14 @@ mod tests {
 
         //Delete "Saturday" and make sure we see no matches when we try to search for it
         table.delete(sat).unwrap();
-        assert!(table.get_record(sat).is_err());
+        assert!(table.get_one_key(sat).is_err());
         let results : Vec<RecordID> = table.lookup_fuzzy_raw("Saturday").unwrap().collect();
         assert_eq!(results.len(), 0);
 
         //Test replacing a record with another one and ensure the right data is retained
-        table.replace(wed, "Miercoles", &"Zhousan".to_string()).unwrap();
-        let results : Vec<(String, String)> = table.lookup_exact("Miercoles").unwrap().map(|record_id| table.get_record(record_id).unwrap()).collect();
+        table.replace_keys(wed, &["Miercoles"]).unwrap();
+        table.replace_value(wed, &"Zhousan".to_string()).unwrap();
+        let results : Vec<(String, String)> = table.lookup_exact("Miercoles").unwrap().map(|record_id| (table.get_one_key(record_id).unwrap(), table.get_value(record_id).unwrap())).collect();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "Miercoles");
         assert_eq!(results[0].1, "Zhousan");
@@ -1300,24 +1341,32 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], wed);
 
-        //Test replacing a record that we deleted earlier
-        table.replace(sat, "Sabado", &"Zhouliu".to_string()).unwrap();
-        let results : Vec<(String, String)> = table.lookup_exact("Sabado").unwrap().map(|record_id| table.get_record(record_id).unwrap()).collect();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, "Sabado");
-        assert_eq!(results[0].1, "Zhouliu");
-        let results : Vec<RecordID> = table.lookup_fuzzy_raw("Sabato").unwrap().collect();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0], sat);
+        //Try replacing the keys and value on a record that we deleted earlier, and make sure
+        // we get the right errors
+        assert!(table.replace_keys(sat, &["Sabado"]).is_err());
+        assert!(table.replace_value(sat, &"Zhouliu".to_string()).is_err());
 
         //Attempt to replace an invalid record and confirm we get a reasonable error
-        assert!(table.replace(RecordID::NULL, "Nullday", &"Null".to_string()).is_err());
+        assert!(table.replace_keys(RecordID::NULL, &["Nullday"]).is_err());
+        assert!(table.replace_value(RecordID::NULL, &"Null".to_string()).is_err());
 
-        //Test the fast-path of the replace method, when the keys are identical
-        table.replace(fri, "Friday", &"Geumyoil".to_string()).unwrap();
-        let (key, val) = table.get_record(fri).unwrap();
-        assert_eq!(key, "Friday");
-        assert_eq!(val, "Geumyoil");
+
+        // let results : Vec<(String, String)> = table.lookup_exact("Sabado").unwrap().map(|record_id| (table.get_one_key(record_id).unwrap(), table.get_value(record_id).unwrap())).collect();
+        // assert_eq!(results.len(), 1);
+        // assert_eq!(results[0].0, "Sabado");
+        // assert_eq!(results[0].1, "Zhouliu");
+        // let results : Vec<RecordID> = table.lookup_fuzzy_raw("Sabato").unwrap().collect();
+        // assert_eq!(results.len(), 1);
+        // assert_eq!(results[0], sat);
+
+//GOATGOAT, Replace a record that has multiple keys with a single key
+//GOATGOATGOAT, Make sure I can't set no keys on a record
+
+
+        // //Test the fast-path of the replace method, when the keys are identical
+        // table.replace(fri, "Friday", &"Geumyoil".to_string()).unwrap();
+        // assert_eq!(table.get_one_key(fri).unwrap(), "Friday");
+        // assert_eq!(table.get_value(fri).unwrap(), "Geumyoil");
 
     }
 
@@ -1341,3 +1390,37 @@ mod tests {
         assert_eq!(results[0], one);
     }
 }
+
+
+//GOATGOATGOAT
+//Next, Add multi-key support
+//1.) Function to add a key to a record
+//2.) Function to remove a key from a record
+//3.) Function to insert a record with multiple keys
+//√ 4.) Separate out records table into keys table and values table
+//√ 5.) Separate calls to get a value and get an iterator for keys
+//6.) Update test to insert keys for every alternative in the Geonames test
+//√ 7.) Will deprecate get_record that gets both a key and a value
+//√ 8.) Function to replace all keys on a record
+//√ 9.) Get rid of is_valid()
+//10.) provide convenience fucntion called simply "get"
+
+//GOATGOATGOAT
+//IDEA: get rid of replace entirely, that can take a deleted key and re-use it.
+//1. Have the table keep deleted keys in an in-memory vec that insert can reuse
+//√ 2. Have a separate replace_keys and a replace_value function, but it will error
+//  unless a valid record is provided
+
+
+//GOATGOATGOAT, Move "BinCode Helpers" into separate file
+
+//GOATGOATGOAT.....  We'll get a merged set of all variants across all keys...  Which is what we want for
+// search...  But when deleting a single key from a record, we need to compile the variants of all keys except
+// the key we're removing, and only remove the difference set.  i.e. start with the variants of the keys we are
+// deleting, and remove the variants of all other keys that we are not deleting from that set.
+
+//GOATGOATGOAT.  Make sure I don't create multiple copies of the same RecordID in the same variant
+//GOATGOATGOAT.  Make sure I don't add identical strings to the same record's keys
+
+//GOATGOATGOAT, Do a separate test for a ValueT of size 0
+
