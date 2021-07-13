@@ -120,6 +120,7 @@ use bincode::Options;
 
 use std::collections::HashSet;
 use std::convert::TryInto;
+use std::iter::FromIterator;
 
 use rocksdb::{DB, DBWithThreadMode, ColumnFamily, ColumnFamilyDescriptor, MergeOperands};
 
@@ -260,6 +261,18 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
             variants = Self::variants(&raw_key, Some(variants));
         }
 
+        self.delete_variants_internal(record_id, variants)?;
+
+        //Now replace the record with an empty sentinel vec in the keys table
+        //NOTE: We replace the record rather than delete it because we assume there are no gaps in the
+        // RecordIDs, when assigning new a RecordID
+        self.put_keys_internal(record_id, &[])?;
+
+        Ok(())
+    }
+
+    fn delete_variants_internal(&mut self, record_id : RecordID, variants : HashSet<Vec<u8>>) -> Result<(), String> {
+        
         //Loop over each variant, and remove the record_id from its associated variant entry in
         // the database, and remove the variant entry if it only referenced the record we're removing
         let variants_cf_handle = self.db.cf_handle(VARIANTS_CF_NAME).unwrap();
@@ -286,11 +299,6 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
                 }
             }
         }
-
-        //Now replace the record with an empty sentinel vec in the keys table
-        //NOTE: We replace the record rather than delete it because we assume there are no gaps in the
-        // RecordIDs, when assigning new a RecordID
-        self.put_keys_internal(record_id, &[])?;
 
         Ok(())
     }
@@ -369,6 +377,50 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         //Add the new keys to the record's entry in the keys table by replacing the keys vector
         // with the superset
         let all_keys_vec : Vec<&[u8]> = all_keys.iter().map(|vec| &vec[..]).collect();
+        self.put_keys_internal(record_id, &all_keys_vec[..])
+    }
+
+    /// Removes the specified keys from the keys associated with a record
+    /// 
+    /// If one of the specified keys is not associated with the record then that specified
+    /// key will be ignored.
+    fn remove_keys_internal(&mut self, record_id : RecordID, raw_keys : &[&[u8]]) -> Result<(), String> {
+
+        //Make a HashSet for the keys we're removing, so we can quickly check for an item
+        let remove_keys : HashSet<&[u8]> = HashSet::from_iter(raw_keys.iter().cloned());
+
+        //Get the record's existing keys, and exclude any that are part of the remove set
+        let mut remaining_keys = Vec::new();
+        for existing_key in self.get_keys_internal(record_id)? {
+            if !remove_keys.contains(&*existing_key) {
+                remaining_keys.push(existing_key);
+            }
+        }
+        
+        //Compute all variants for the keys we're removing
+        let mut remove_keys_variants = HashSet::new();
+        for remove_key in raw_keys {
+            remove_keys_variants = Self::variants(remove_key, Some(remove_keys_variants));
+        }
+
+        //Compute all the variants for the keys that must remain
+        let mut remaining_keys_variants = HashSet::new();
+        for remaining_key in remaining_keys.iter() {
+            remaining_keys_variants = Self::variants(&*remaining_key, Some(remaining_keys_variants));
+        }
+
+        //Exclude all of the overlapping variants, leaving only the variants that are unique
+        //to the keys we're removing
+        let mut unique_keys_variants = HashSet::new();
+        for unique_keys_variant in remove_keys_variants.difference(&remaining_keys_variants) {
+            unique_keys_variants.insert(unique_keys_variant.to_owned());
+        }
+
+        //Delete our RecordID from each variant's list, and remove the list if we made it empty
+        self.delete_variants_internal(record_id, unique_keys_variants)?;
+
+        //Update our record's keys in the keys table
+        let all_keys_vec : Vec<&[u8]> = remaining_keys.iter().map(|vec| &vec[..]).collect();
         self.put_keys_internal(record_id, &all_keys_vec[..])
     }
 
@@ -858,6 +910,18 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         self.add_keys_internal(record_id, &raw_keys[..])
     }
 
+    /// Removes the supplied keys from the keys associated with a record
+    /// 
+    /// If one of the specified keys is not associated with the record then that specified
+    /// key will be ignored.
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn remove_keys(&mut self, record_id : RecordID, keys : &[&str]) -> Result<(), String> {
+        let raw_keys : Vec<&[u8]> = keys.into_iter().map(|key| key.as_bytes()).collect();
+        self.remove_keys_internal(record_id, &raw_keys[..])
+    }
+
     /// Replaces a record's keys with the supplied keys
     /// 
     /// The supplied `record_id` must references an existing record that has not been deleted.
@@ -957,6 +1021,17 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// unwrapped RocksDB error.
     pub fn add_keys(&mut self, record_id : RecordID, keys : &[&[u8]]) -> Result<(), String> {
         self.add_keys_internal(record_id, keys)
+    }
+
+    /// Removes the supplied keys from the keys associated with a record
+    /// 
+    /// If one of the specified keys is not associated with the record then that specified
+    /// key will be ignored.
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn remove_keys(&mut self, record_id : RecordID, keys : &[&[u8]]) -> Result<(), String> {
+        self.remove_keys_internal(record_id, keys)
     }
 
     /// Replaces a record's keys with the supplied keys
@@ -1417,7 +1492,7 @@ mod tests {
 
         //Add some new keys to it, and verify that it can be found using any of its three keys
         table.add_keys(sat, &["Sabado", "Zhouliu"]).unwrap();
-        let results : Vec<RecordID> = table.lookup_exact("Saturday").unwrap().collect();
+        let results : Vec<RecordID> = table.lookup_fuzzy_raw("Saturday").unwrap().collect();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], sat);
         let results : Vec<RecordID> = table.lookup_exact("Zhouliu").unwrap().collect();
@@ -1429,11 +1504,26 @@ mod tests {
 
         //Test deleting one of the keys from a record, and make sure we can't find it using that
         //key but the other keys are unaffected
-        //GOATGOATGOAT
+        table.remove_keys(sat, &["Sabado"]).unwrap();
+        let results : Vec<RecordID> = table.lookup_exact("Sabado").unwrap().collect();
+        assert_eq!(results.len(), 0);
+        let results : Vec<RecordID> = table.lookup_fuzzy_raw("Sabato").unwrap().collect();
+        assert_eq!(results.len(), 0);
+        let results : Vec<RecordID> = table.lookup_fuzzy_raw("Saturnsday").unwrap().collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], sat);
+        let results : Vec<RecordID> = table.lookup_exact("Zhouliu").unwrap().collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], sat);
+
 
 //GOATGOAT, Replace a record that has multiple keys with a single key
 //GOATGOATGOAT, Make sure I can't set no keys on a record
 
+
+        //Test that nothing breaks when we have two keys with overlapping variants, and then
+        // delete one
+        //GOATGOATGOAT
 
         // //Test the fast-path of the replace method, when the keys are identical
         // table.replace(fri, "Friday", &"Geumyoil".to_string()).unwrap();
@@ -1483,6 +1573,7 @@ mod tests {
 //√ 2. Have a separate replace_keys and a replace_value function, but it will error
 //  unless a valid record is provided
 
+//GOATGOATGOAT, API that counts the number of keys that a given record has
 
 //GOATGOATGOAT, Move "BinCode Helpers" into separate file
 
