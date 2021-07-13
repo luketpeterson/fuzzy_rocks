@@ -200,7 +200,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         //Open the database
         let db = DB::open_cf_descriptors(&db_opts, path, vec![keys_cf, values_cf, variants_cf])?;
 
-        //Find the maximum RecordID, by probing the keys in the "keys" column family
+        //Find the maximum RecordID, by probing the entries in the "keys" column family
         let keys_cf_handle = db.cf_handle(KEYS_CF_NAME).unwrap();
         let record_count = probe_for_max_sequential_key(&db, keys_cf_handle, 255)?;
 
@@ -313,13 +313,19 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     }
 
     /// Adds the RecordID to each variant of all supplied keys
-    fn put_variants_internal(&mut self, record_id : RecordID, raw_keys : &[&[u8]]) -> Result<(), String> {
+    fn put_key_variants_internal(&mut self, record_id : RecordID, raw_keys : &[&[u8]]) -> Result<(), String> {
 
         //Now compute all the variants so we'll be able to add an entry to each one
         let mut variants = HashSet::new();
         for raw_key in raw_keys {
             variants = Self::variants(raw_key, Some(variants));
         }
+
+        self.put_variants_internal(record_id, variants)
+    }
+
+    /// Adds the RecordID to each variant of all supplied keys
+    fn put_variants_internal(&mut self, record_id : RecordID, variants : HashSet<Vec<u8>>) -> Result<(), String> {
 
         //Add the record_id to each variant
         let variants_cf_handle = self.db.cf_handle(VARIANTS_CF_NAME).unwrap();
@@ -332,13 +338,47 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         Ok(())
     }
 
+    /// Add additional keys to a record, including creation of all associated variants
+    fn add_keys_internal(&mut self, record_id : RecordID, raw_keys : &[&[u8]]) -> Result<(), String> {
+
+        //Compute all variants for the keys we're going to add
+        let mut all_keys = HashSet::new();
+        let mut new_keys_variants = HashSet::new();
+        for raw_key in raw_keys {
+            new_keys_variants = Self::variants(raw_key, Some(new_keys_variants));
+            all_keys.insert(raw_key.to_vec());
+        }
+
+        //Get the record's existing keys and Compute all existing variants based on those
+        let mut existing_keys_variants = HashSet::new();
+        let existing_keys : Vec<Vec<u8>> = self.get_keys_internal(record_id)?.map(|key_box| key_box.to_vec()).collect();
+        for existing_key in existing_keys.iter() {
+            existing_keys_variants = Self::variants(existing_key, Some(existing_keys_variants));
+            all_keys.insert(existing_key.clone());
+        }
+
+        //Get the set of variants that is unique to the keys we'll be adding
+        let mut unique_keys_variants = HashSet::new();
+        for unique_keys_variant in new_keys_variants.difference(&existing_keys_variants) {
+            unique_keys_variants.insert(unique_keys_variant.to_owned());
+        }
+
+        //Add the new record_id to the appropriate entries for each of the new variants
+        self.put_variants_internal(record_id, unique_keys_variants)?;
+
+        //Add the new keys to the record's entry in the keys table by replacing the keys vector
+        // with the superset
+        let all_keys_vec : Vec<&[u8]> = all_keys.iter().map(|vec| &vec[..]).collect();
+        self.put_keys_internal(record_id, &all_keys_vec[..])
+    }
+
     /// Replaces all of the keys in a record with the supplied keys
     ///
     /// NOTE: This function will NOT update any variants used to locate the key
     fn replace_keys_internal(&mut self, record_id : RecordID, raw_keys : &[&[u8]]) -> Result<(), String> {
 
         self.delete_keys_internal(record_id)?;
-        self.put_variants_internal(record_id, raw_keys)?;
+        self.put_key_variants_internal(record_id, raw_keys)?;
         self.put_keys_internal(record_id, raw_keys)
     }
 
@@ -404,7 +444,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         };
 
         //Put the keys, variants and value into the respective tables
-        self.put_variants_internal(new_record_id, raw_keys)?;
+        self.put_key_variants_internal(new_record_id, raw_keys)?;
         self.put_keys_internal(new_record_id, raw_keys)?;
         self.put_value_internal(new_record_id, value)?;
 
@@ -807,6 +847,17 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         self.insert_internal(&[key.as_bytes()], value, None)
     }
 
+    /// Adds the supplied keys to the record's keys
+    /// 
+    /// The supplied `record_id` must references an existing record that has not been deleted.
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn add_keys(&mut self, record_id : RecordID, keys : &[&str]) -> Result<(), String> {
+        let raw_keys : Vec<&[u8]> = keys.into_iter().map(|key| key.as_bytes()).collect();
+        self.add_keys_internal(record_id, &raw_keys[..])
+    }
+
     /// Replaces a record's keys with the supplied keys
     /// 
     /// The supplied `record_id` must references an existing record that has not been deleted.
@@ -896,6 +947,16 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// unwrapped RocksDB error.
     pub fn insert(&mut self, key : &[u8], value : &ValueT) -> Result<RecordID, String> {
         self.insert_internal(&[key], value, None)
+    }
+
+    /// Adds the supplied keys to the record's keys
+    /// 
+    /// The supplied `record_id` must references an existing record that has not been deleted.
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn add_keys(&mut self, record_id : RecordID, keys : &[&[u8]]) -> Result<(), String> {
+        self.add_keys_internal(record_id, keys)
     }
 
     /// Replaces a record's keys with the supplied keys
@@ -1350,14 +1411,25 @@ mod tests {
         assert!(table.replace_keys(RecordID::NULL, &["Nullday"]).is_err());
         assert!(table.replace_value(RecordID::NULL, &"Null".to_string()).is_err());
 
+        //Recreate Saturday using the full-featured create_record() api
+        //GOATGOATGOAT, make create_record, and make the above comment true
+        let sat = table.insert("Saturday", &"Douyoubi".to_string()).unwrap();
 
-        // let results : Vec<(String, String)> = table.lookup_exact("Sabado").unwrap().map(|record_id| (table.get_one_key(record_id).unwrap(), table.get_value(record_id).unwrap())).collect();
-        // assert_eq!(results.len(), 1);
-        // assert_eq!(results[0].0, "Sabado");
-        // assert_eq!(results[0].1, "Zhouliu");
-        // let results : Vec<RecordID> = table.lookup_fuzzy_raw("Sabato").unwrap().collect();
-        // assert_eq!(results.len(), 1);
-        // assert_eq!(results[0], sat);
+        //Add some new keys to it, and verify that it can be found using any of its three keys
+        table.add_keys(sat, &["Sabado", "Zhouliu"]).unwrap();
+        let results : Vec<RecordID> = table.lookup_exact("Saturday").unwrap().collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], sat);
+        let results : Vec<RecordID> = table.lookup_exact("Zhouliu").unwrap().collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], sat);
+        let results : Vec<RecordID> = table.lookup_fuzzy_raw("Sabato").unwrap().collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], sat);
+
+        //Test deleting one of the keys from a record, and make sure we can't find it using that
+        //key but the other keys are unaffected
+        //GOATGOATGOAT
 
 //GOATGOAT, Replace a record that has multiple keys with a single key
 //GOATGOATGOAT, Make sure I can't set no keys on a record
@@ -1394,7 +1466,7 @@ mod tests {
 
 //GOATGOATGOAT
 //Next, Add multi-key support
-//1.) Function to add a key to a record
+//√ 1.) Function to add a key to a record
 //2.) Function to remove a key from a record
 //3.) Function to insert a record with multiple keys
 //√ 4.) Separate out records table into keys table and values table
