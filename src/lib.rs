@@ -667,6 +667,27 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         }
     }
 
+    /// Returns the number of keys associated with a specified record
+    pub fn keys_count(&self, record_id : RecordID) -> Result<usize, String> {
+
+        //Get the keys vec from the db
+        let keys_cf_handle = self.db.cf_handle(KEYS_CF_NAME).unwrap();
+        if let Some(keys_vec_bytes) = self.db.get_pinned_cf(keys_cf_handle, record_id.0.to_le_bytes())? {
+
+            //The vector element count should be the first encoded usize
+            let mut skip_bytes = 0;
+            let keys_count = bincode_u64_le_varint(&keys_vec_bytes, &mut skip_bytes);
+
+            if keys_count > 0 {
+                Ok(keys_count as usize)
+            } else {
+                Err("Invalid record_id".to_string())
+            }
+        } else {
+            Err("Invalid record_id".to_string())
+        }
+    }
+
     /// Returns the keys associated with a specified record
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
@@ -1512,15 +1533,17 @@ mod tests {
         assert!(table.replace_keys(RecordID::NULL, &["Nullday"]).is_err());
         assert!(table.replace_value(RecordID::NULL, &"Null".to_string()).is_err());
 
-        //Recreate Saturday using the full-featured create_record() api
-        //GOATGOATGOAT, make create_record, and make the above comment true
-        let sat = table.insert("Saturday", &"Douyoubi".to_string()).unwrap();
-
         //GOATGOATGOAT, Do a test with create_record(), to make sure it fails if no keys are
         //supplied, or there are any zero-length keys
 
+        //Recreate Saturday using the full-featured create_record() api
+        //GOATGOATGOAT, make create_record, and make the above comment true
+        let sat = table.insert("Saturday", &"Douyoubi".to_string()).unwrap();
+        assert_eq!(table.keys_count(sat).unwrap(), 1);
+
         //Add some new keys to it, and verify that it can be found using any of its three keys
         table.add_keys(sat, &["Sabado", "Zhouliu"]).unwrap();
+        assert_eq!(table.keys_count(sat).unwrap(), 3);
         let results : Vec<RecordID> = table.lookup_fuzzy_raw("Saturday").unwrap().collect();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], sat);
@@ -1534,6 +1557,7 @@ mod tests {
         //Test deleting one of the keys from a record, and make sure we can't find it using that
         //key but the other keys are unaffected
         table.remove_keys(sat, &["Sabado"]).unwrap();
+        assert_eq!(table.keys_count(sat).unwrap(), 2);
         let results : Vec<RecordID> = table.lookup_exact("Sabado").unwrap().collect();
         assert_eq!(results.len(), 0);
         let results : Vec<RecordID> = table.lookup_fuzzy_raw("Sabato").unwrap().collect();
@@ -1547,14 +1571,19 @@ mod tests {
 
         //Attempt to remove the remaining keys and ensure we get an error and both keys remain
         assert!(table.remove_keys(sat, &["Saturday", "Zhouliu"]).is_err());
+        assert_eq!(table.keys_count(sat).unwrap(), 2);
         let results : Vec<RecordID> = table.lookup_exact("Saturday").unwrap().collect();
         assert_eq!(results.len(), 1);
         let results : Vec<RecordID> = table.lookup_exact("Zhouliu").unwrap().collect();
         assert_eq!(results.len(), 1);
 
-
-//GOATGOAT, Replace a record that has multiple keys with a single key
-//GOATGOATGOAT, Make sure I can't set no keys on a record
+        //Test that replacing the keys of a record doesn't leave any orphaned variants
+        table.replace_keys(sat, &["Sabado"]).unwrap();
+        assert_eq!(table.keys_count(sat).unwrap(), 1);
+        let results : Vec<RecordID> = table.lookup_fuzzy_raw("Saturday").unwrap().collect();
+        assert_eq!(results.len(), 0);
+        let results : Vec<RecordID> = table.lookup_fuzzy_raw("Zhouliu").unwrap().collect();
+        assert_eq!(results.len(), 0);
 
 
         //Test that nothing breaks when we have two keys with overlapping variants, and then
@@ -1602,6 +1631,7 @@ mod tests {
 //√ 8.) Function to replace all keys on a record
 //√ 9.) Get rid of is_valid()
 //10.) provide convenience fucntion called simply "get"
+//√ 11.) API that counts the number of keys that a given record has
 
 //GOATGOATGOAT
 //IDEA: get rid of replace entirely, that can take a deleted key and re-use it.
@@ -1609,14 +1639,7 @@ mod tests {
 //√ 2. Have a separate replace_keys and a replace_value function, but it will error
 //  unless a valid record is provided
 
-//GOATGOATGOAT, API that counts the number of keys that a given record has
-
 //GOATGOATGOAT, Move "BinCode Helpers" into separate file
-
-//GOATGOATGOAT.....  We'll get a merged set of all variants across all keys...  Which is what we want for
-// search...  But when deleting a single key from a record, we need to compile the variants of all keys except
-// the key we're removing, and only remove the difference set.  i.e. start with the variants of the keys we are
-// deleting, and remove the variants of all other keys that we are not deleting from that set.
 
 //GOATGOATGOAT.  Make sure I don't create multiple copies of the same RecordID in the same variant
 //GOATGOATGOAT.  Make sure I don't add identical strings to the same record's keys
