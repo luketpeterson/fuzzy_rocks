@@ -956,8 +956,8 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn create(&mut self, keys : &[&str], value : &ValueT) -> Result<RecordID, String> {
-        let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| key.as_bytes()));
+    pub fn create<K : Borrow<str>>(&mut self, keys : &[K], value : &ValueT) -> Result<RecordID, String> {
+        let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| key.borrow().as_bytes()));
         self.insert_internal(&keys_set, value)
     }
 
@@ -967,8 +967,8 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn add_keys(&mut self, record_id : RecordID, keys : &[&str]) -> Result<(), String> {
-        let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| key.as_bytes()));
+    pub fn add_keys<K : Borrow<str>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
+        let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| key.borrow().as_bytes()));
         self.add_keys_internal(record_id, &keys_set)
     }
 
@@ -982,8 +982,8 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn remove_keys(&mut self, record_id : RecordID, keys : &[&str]) -> Result<(), String> {
-        let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| key.as_bytes()));
+    pub fn remove_keys<K : Borrow<str>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
+        let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| key.borrow().as_bytes()));
         self.remove_keys_internal(record_id, &keys_set)
     }
 
@@ -993,8 +993,8 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn replace_keys(&mut self, record_id : RecordID, keys : &[&str]) -> Result<(), String> {
-        let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| key.as_bytes()));
+    pub fn replace_keys<K : Borrow<str>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
+        let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| key.borrow().as_bytes()));
         self.replace_keys_internal(record_id, &keys_set)
     }
 
@@ -1103,8 +1103,8 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn create(&mut self, keys : &[&[u8]], value : &ValueT) -> Result<RecordID, String> {
-        let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| *key));
+    pub fn create<K : Borrow<[u8]>>(&mut self, keys : &[K], value : &ValueT) -> Result<RecordID, String> {
+        let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| key.borrow()));
         self.insert_internal(&keys_set, value)
     }
 
@@ -1114,8 +1114,8 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn add_keys(&mut self, record_id : RecordID, keys : &[&[u8]]) -> Result<(), String> {
-        let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| *key));
+    pub fn add_keys<K : Borrow<[u8]>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
+        let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| key.borrow()));
         self.add_keys_internal(record_id, &keys_set)
     }
 
@@ -1129,8 +1129,8 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn remove_keys(&mut self, record_id : RecordID, keys : &[&[u8]]) -> Result<(), String> {
-        let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| *key));
+    pub fn remove_keys<K : Borrow<[u8]>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
+        let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| key.borrow()));
         self.remove_keys_internal(record_id, &keys_set)
     }
 
@@ -1140,8 +1140,8 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn replace_keys(&mut self, record_id : RecordID, keys : &[&[u8]]) -> Result<(), String> {
-        let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| *key));
+    pub fn replace_keys<K : Borrow<[u8]>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
+        let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| key.borrow()));
         self.replace_keys_internal(record_id, &keys_set)
     }
 
@@ -1455,7 +1455,15 @@ mod tests {
         let mut record_id = RecordID::NULL;
         let mut tsv_record_count = 0;
         for geoname in tsv_parser.deserialize::<GeoName>().map(|result| result.unwrap()) {
-            record_id = table.insert(&geoname.name.to_lowercase(), &geoname.geonameid).unwrap();
+
+            //Separate the comma-separated alternatenames field
+            let mut names : Vec<String> = geoname.alternatenames.split(',').map(|string| string.to_lowercase()).collect();
+            
+            //Add the primary name for the place
+            names.push(geoname.name.to_lowercase());
+            
+            //Create a record in the table
+            record_id = table.create(&names[..], &geoname.geonameid).unwrap();
             tsv_record_count += 1;
 
             //Status Print
@@ -1582,14 +1590,16 @@ mod tests {
         assert!(table.replace_value(sat, &"Zhouliu".to_string()).is_err());
 
         //Attempt to replace a record's keys with an empty list, check the error
-        assert!(table.replace_keys(sat, &[]).is_err());
+        let empty_slice : &[&str] = &[];
+        assert!(table.replace_keys(sat, empty_slice).is_err());
         
         //Attempt to replace an invalid record and confirm we get a reasonable error
         assert!(table.replace_keys(RecordID::NULL, &["Nullday"]).is_err());
         assert!(table.replace_value(RecordID::NULL, &"Null".to_string()).is_err());
 
         //Test that create() returns the right error if no keys are supplied
-        assert!(table.create(&[], &"Douyoubi".to_string()).is_err());
+        let empty_slice : &[&str] = &[];
+        assert!(table.create(empty_slice, &"Douyoubi".to_string()).is_err());
 
         //Recreate Saturday using the create() api
         //While we're here, Also test that the same key string occurring more than once
@@ -1700,7 +1710,7 @@ mod tests {
 //√ 3.) Function to insert a record with multiple keys
 //√ 4.) Separate out records table into keys table and values table
 //√ 5.) Separate calls to get a value and get an iterator for keys
-//6.) Update test to insert keys for every alternative in the Geonames test
+//√ 6.) Update test to insert keys for every alternative in the Geonames test
 //√ 7.) Will deprecate get_record that gets both a key and a value
 //√ 8.) Function to replace all keys on a record
 //√ 9.) Get rid of is_valid()
