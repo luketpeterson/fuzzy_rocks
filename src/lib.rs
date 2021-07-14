@@ -159,6 +159,7 @@ pub struct Table<ValueT : Serialize + serde::de::DeserializeOwned, const MAX_DEL
     record_count : usize,
     db : DBWithThreadMode<rocksdb::SingleThreaded>,
     path : String,
+    deleted_records : Vec<RecordID>, //NOTE: Currently we don't try to hold onto deleted records across unloads, but we may change this in the future.
     phantom: PhantomData<ValueT>,
 }
 
@@ -211,6 +212,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
             record_count,
             db,
             path : path.to_string(),
+            deleted_records : vec![],
             phantom : PhantomData
         })
     }
@@ -247,7 +249,10 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     pub fn delete(&mut self, record_id : RecordID) -> Result<(), String> {
 
         self.delete_keys_internal(record_id)?;
-        self.delete_value_internal(record_id)
+        self.delete_value_internal(record_id)?;
+        self.deleted_records.push(record_id);
+
+        Ok(())
     }
 
     /// Deletes the keys belonging to a record, and all associated variants
@@ -486,17 +491,15 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// Inserts a record into the Table, called by insert(), which is implemented differently depending
     /// on the UNICODE_KEYS constant
     /// 
-    /// If a RecordID is supplied, it is assumed that it represents a record that has been deleted earlier
-    /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    fn insert_internal<K : Borrow<[u8]> + Eq + Hash + Serialize>(&mut self, raw_keys : &HashSet<K>, value : &ValueT, supplied_id : Option<RecordID>) -> Result<RecordID, String> {
+    fn insert_internal<K : Borrow<[u8]> + Eq + Hash + Serialize>(&mut self, raw_keys : &HashSet<K>, value : &ValueT) -> Result<RecordID, String> {
 
         if raw_keys.len() < 1 {
             return Err("record must have at least one key".to_string());
         }
 
-        let new_record_id = match supplied_id {
+        let new_record_id = match self.deleted_records.pop() {
             None => {
                 //We'll be creating a new record, so get the next unique record_id
                 let new_record_id = RecordID(self.record_count);
@@ -924,7 +927,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     pub fn insert(&mut self, key : &str, value : &ValueT) -> Result<RecordID, String> {
         let mut keys_set = HashSet::with_capacity(1);
         keys_set.insert(key.as_bytes());
-        self.insert_internal(&keys_set, value, None)
+        self.insert_internal(&keys_set, value)
     }
 
     /// Creates a new record in the table and returns the RecordID of the new record
@@ -941,7 +944,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// unwrapped RocksDB error.
     pub fn create(&mut self, keys : &[&str], value : &ValueT) -> Result<RecordID, String> {
         let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| key.as_bytes()));
-        self.insert_internal(&keys_set, value, None)
+        self.insert_internal(&keys_set, value)
     }
 
     /// Adds the supplied keys to the record's keys
@@ -1057,7 +1060,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     pub fn insert(&mut self, key : &[u8], value : &ValueT) -> Result<RecordID, String> {
         let mut keys_set = HashSet::with_capacity(1);
         keys_set.insert(key);
-        self.insert_internal(&keys_set, value, None)
+        self.insert_internal(&keys_set, value)
     }
 
     /// Creates a new record in the table and returns the RecordID of the new record
@@ -1074,7 +1077,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// unwrapped RocksDB error.
     pub fn create(&mut self, keys : &[&[u8]], value : &ValueT) -> Result<RecordID, String> {
         let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| *key));
-        self.insert_internal(&keys_set, value, None)
+        self.insert_internal(&keys_set, value)
     }
 
     /// Adds the supplied keys to the record's keys
@@ -1680,7 +1683,7 @@ mod tests {
 
 //GOATGOATGOAT
 //IDEA: get rid of replace entirely, that can take a deleted key and re-use it.
-//1. Have the table keep deleted keys in an in-memory vec that insert can reuse
+//√ 1. Have the table keep deleted keys in an in-memory vec that insert can reuse
 //√ 2. Have a separate replace_keys and a replace_value function, but it will error
 //  unless a valid record is provided
 
