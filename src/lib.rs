@@ -111,7 +111,9 @@
 //! 
 
 use core::marker::PhantomData;
+use core::borrow::Borrow;
 use core::cmp::min;
+use core::hash::Hash;
 
 use num_traits::Zero;
 
@@ -123,9 +125,6 @@ use std::convert::TryInto;
 use std::iter::FromIterator;
 
 use rocksdb::{DB, DBWithThreadMode, ColumnFamily, ColumnFamilyDescriptor, MergeOperands};
-
-//GOATGOATGOAT, Internal functions that accept slices of keys could instead accept iterators to save
-//on allocations
 
 /// A collection containing records that may be searched by `key`
 /// 
@@ -269,7 +268,8 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         //Now replace the record with an empty sentinel vec in the keys table
         //NOTE: We replace the record rather than delete it because we assume there are no gaps in the
         // RecordIDs, when assigning new a RecordID
-        self.put_keys_internal(record_id, &[])?;
+        let empty_set : HashSet<&[u8]> = HashSet::new();
+        self.put_keys_internal(record_id, &empty_set)?;
 
         Ok(())
     }
@@ -312,24 +312,25 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// If we are updating an old record, we will overwrite it.
     /// 
     /// NOTE: This function will NOT update any variants used to locate the key
-    fn put_keys_internal(&mut self, record_id : RecordID, raw_keys : &[&[u8]]) -> Result<(), String> {
+    fn put_keys_internal<K : Borrow<[u8]> + Eq + Hash + Serialize>(&mut self, record_id : RecordID, raw_keys : &HashSet<K>) -> Result<(), String> {
         
         //Create the keys vector, serialize it, and put in into the keys table.
         let keys_cf_handle = self.db.cf_handle(KEYS_CF_NAME).unwrap();
         let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
-        let keys_bytes = record_coder.serialize(raw_keys).unwrap();
+        let keys_bytes = record_coder.serialize(&raw_keys).unwrap();
         self.db.put_cf(keys_cf_handle, usize::to_le_bytes(record_id.0), keys_bytes)?;
 
         Ok(())
     }
 
     /// Adds the RecordID to each variant of all supplied keys
-    fn put_key_variants_internal(&mut self, record_id : RecordID, raw_keys : &[&[u8]]) -> Result<(), String> {
+    fn put_key_variants_internal<K : Borrow<[u8]> + Eq + Hash + Serialize>(&mut self, record_id : RecordID, raw_keys : &HashSet<K>) -> Result<(), String>
+    {
 
         //Now compute all the variants so we'll be able to add an entry to each one
         let mut variants = HashSet::new();
         for raw_key in raw_keys {
-            variants = Self::variants(raw_key, Some(variants));
+            variants = Self::variants(raw_key.borrow(), Some(variants));
         }
 
         self.put_variants_internal(record_id, variants)
@@ -350,14 +351,14 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     }
 
     /// Add additional keys to a record, including creation of all associated variants
-    fn add_keys_internal(&mut self, record_id : RecordID, raw_keys : &[&[u8]]) -> Result<(), String> {
+    fn add_keys_internal<K : Borrow<[u8]> + Eq + Hash + Serialize>(&mut self, record_id : RecordID, raw_keys : &HashSet<K>) -> Result<(), String> {
 
         //Compute all variants for the keys we're going to add
         let mut all_keys = HashSet::new();
         let mut new_keys_variants = HashSet::new();
         for raw_key in raw_keys {
-            new_keys_variants = Self::variants(raw_key, Some(new_keys_variants));
-            all_keys.insert(raw_key.to_vec());
+            new_keys_variants = Self::variants(raw_key.borrow(), Some(new_keys_variants));
+            all_keys.insert(raw_key.borrow());
         }
 
         //Get the record's existing keys and Compute all existing variants based on those
@@ -365,7 +366,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         let existing_keys : Vec<Vec<u8>> = self.get_keys_internal(record_id)?.map(|key_box| key_box.to_vec()).collect();
         for existing_key in existing_keys.iter() {
             existing_keys_variants = Self::variants(existing_key, Some(existing_keys_variants));
-            all_keys.insert(existing_key.clone());
+            all_keys.insert(existing_key);
         }
 
         //Get the set of variants that is unique to the keys we'll be adding
@@ -379,24 +380,20 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
 
         //Add the new keys to the record's entry in the keys table by replacing the keys vector
         // with the superset
-        let all_keys_vec : Vec<&[u8]> = all_keys.iter().map(|vec| &vec[..]).collect();
-        self.put_keys_internal(record_id, &all_keys_vec[..])
+        self.put_keys_internal(record_id, &all_keys)
     }
 
     /// Removes the specified keys from the keys associated with a record
     /// 
     /// If one of the specified keys is not associated with the record then that specified
     /// key will be ignored.
-    fn remove_keys_internal(&mut self, record_id : RecordID, raw_keys : &[&[u8]]) -> Result<(), String> {
-
-        //Make a HashSet for the keys we're removing, so we can quickly check for an item
-        let remove_keys : HashSet<&[u8]> = HashSet::from_iter(raw_keys.iter().cloned());
+    fn remove_keys_internal<K : Borrow<[u8]> + Eq + Hash + Serialize>(&mut self, record_id : RecordID, remove_keys : &HashSet<K>) -> Result<(), String> {
 
         //Get the record's existing keys, and exclude any that are part of the remove set
-        let mut remaining_keys = Vec::new();
+        let mut remaining_keys = HashSet::new();
         for existing_key in self.get_keys_internal(record_id)? {
             if !remove_keys.contains(&*existing_key) {
-                remaining_keys.push(existing_key);
+                remaining_keys.insert(existing_key);
             }
         }
         
@@ -408,8 +405,8 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
 
         //Compute all variants for the keys we're removing
         let mut remove_keys_variants = HashSet::new();
-        for remove_key in raw_keys {
-            remove_keys_variants = Self::variants(remove_key, Some(remove_keys_variants));
+        for remove_key in remove_keys {
+            remove_keys_variants = Self::variants(remove_key.borrow(), Some(remove_keys_variants));
         }
 
         //Compute all the variants for the keys that must remain
@@ -429,14 +426,13 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         self.delete_variants_internal(record_id, unique_keys_variants)?;
 
         //Update our record's keys in the keys table
-        let all_keys_vec : Vec<&[u8]> = remaining_keys.iter().map(|vec| &vec[..]).collect();
-        self.put_keys_internal(record_id, &all_keys_vec[..])
+        self.put_keys_internal(record_id, &remaining_keys)
     }
 
     /// Replaces all of the keys in a record with the supplied keys
     ///
     /// NOTE: This function will NOT update any variants used to locate the key
-    fn replace_keys_internal(&mut self, record_id : RecordID, raw_keys : &[&[u8]]) -> Result<(), String> {
+    fn replace_keys_internal<K : Borrow<[u8]> + Eq + Hash + Serialize>(&mut self, record_id : RecordID, raw_keys : &HashSet<K>) -> Result<(), String> {
 
         if raw_keys.len() < 1 {
             return Err("record must have at least one key".to_string());
@@ -496,7 +492,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    fn insert_internal(&mut self, raw_keys : &[&[u8]], value : &ValueT, supplied_id : Option<RecordID>) -> Result<RecordID, String> {
+    fn insert_internal<K : Borrow<[u8]> + Eq + Hash + Serialize>(&mut self, raw_keys : &HashSet<K>, value : &ValueT, supplied_id : Option<RecordID>) -> Result<RecordID, String> {
 
         if raw_keys.len() < 1 {
             return Err("record must have at least one key".to_string());
@@ -923,6 +919,19 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
 
     /// Inserts a new key-value pair into the table and returns the RecordID of the new record
     /// 
+    /// This is a high-level interface to be used if multiple keys are not needed, but is
+    /// functions the same as [create](Table::create)
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn insert(&mut self, key : &str, value : &ValueT) -> Result<RecordID, String> {
+        let mut keys_set = HashSet::with_capacity(1);
+        keys_set.insert(key.as_bytes());
+        self.insert_internal(&keys_set, value, None)
+    }
+
+    /// Creates a new record in the table and returns the RecordID of the new record
+    /// 
     /// This function will always create a new record, regardless of whether an identical key exists.
     /// It is permissible to have two distinct records with identical keys.
     /// 
@@ -933,8 +942,9 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn insert(&mut self, key : &str, value : &ValueT) -> Result<RecordID, String> {
-        self.insert_internal(&[key.as_bytes()], value, None)
+    pub fn create(&mut self, keys : &[&str], value : &ValueT) -> Result<RecordID, String> {
+        let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| key.as_bytes()));
+        self.insert_internal(&keys_set, value, None)
     }
 
     /// Adds the supplied keys to the record's keys
@@ -944,8 +954,8 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn add_keys(&mut self, record_id : RecordID, keys : &[&str]) -> Result<(), String> {
-        let raw_keys : Vec<&[u8]> = keys.into_iter().map(|key| key.as_bytes()).collect();
-        self.add_keys_internal(record_id, &raw_keys[..])
+        let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| key.as_bytes()));
+        self.add_keys_internal(record_id, &keys_set)
     }
 
     /// Removes the supplied keys from the keys associated with a record
@@ -959,8 +969,8 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn remove_keys(&mut self, record_id : RecordID, keys : &[&str]) -> Result<(), String> {
-        let raw_keys : Vec<&[u8]> = keys.into_iter().map(|key| key.as_bytes()).collect();
-        self.remove_keys_internal(record_id, &raw_keys[..])
+        let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| key.as_bytes()));
+        self.remove_keys_internal(record_id, &keys_set)
     }
 
     /// Replaces a record's keys with the supplied keys
@@ -970,8 +980,8 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn replace_keys(&mut self, record_id : RecordID, keys : &[&str]) -> Result<(), String> {
-        let raw_keys : Vec<&[u8]> = keys.into_iter().map(|key| key.as_bytes()).collect();
-        self.replace_keys_internal(record_id, &raw_keys[..])
+        let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| key.as_bytes()));
+        self.replace_keys_internal(record_id, &keys_set)
     }
 
     /// Returns an iterator over all of the key associated with the specified record
@@ -1040,6 +1050,19 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
 
     /// Inserts a new key-value pair into the table and returns the RecordID of the new record
     /// 
+    /// This is a high-level interface to be used if multiple keys are not needed, but is
+    /// functions the same as [create](Table::create)
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn insert(&mut self, key : &[u8], value : &ValueT) -> Result<RecordID, String> {
+        let mut keys_set = HashSet::with_capacity(1);
+        keys_set.insert(key);
+        self.insert_internal(&keys_set, value, None)
+    }
+
+    /// Creates a new record in the table and returns the RecordID of the new record
+    /// 
     /// This function will always create a new record, regardless of whether an identical key exists.
     /// It is permissible to have two distinct records with identical keys.
     /// 
@@ -1050,8 +1073,9 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn insert(&mut self, key : &[u8], value : &ValueT) -> Result<RecordID, String> {
-        self.insert_internal(&[key], value, None)
+    pub fn create(&mut self, keys : &[&[u8]], value : &ValueT) -> Result<RecordID, String> {
+        let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| *key));
+        self.insert_internal(&keys_set, value, None)
     }
 
     /// Adds the supplied keys to the record's keys
@@ -1061,7 +1085,8 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn add_keys(&mut self, record_id : RecordID, keys : &[&[u8]]) -> Result<(), String> {
-        self.add_keys_internal(record_id, keys)
+        let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| *key));
+        self.add_keys_internal(record_id, &keys_set)
     }
 
     /// Removes the supplied keys from the keys associated with a record
@@ -1075,7 +1100,8 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn remove_keys(&mut self, record_id : RecordID, keys : &[&[u8]]) -> Result<(), String> {
-        self.remove_keys_internal(record_id, keys)
+        let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| *key));
+        self.remove_keys_internal(record_id, &keys_set)
     }
 
     /// Replaces a record's keys with the supplied keys
@@ -1085,7 +1111,8 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn replace_keys(&mut self, record_id : RecordID, keys : &[&[u8]]) -> Result<(), String> {
-        self.replace_keys_internal(record_id, keys)
+        let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| *key));
+        self.replace_keys_internal(record_id, &keys_set)
     }
 
     /// Returns an iterator over all of the key associated with the specified record
@@ -1533,12 +1560,13 @@ mod tests {
         assert!(table.replace_keys(RecordID::NULL, &["Nullday"]).is_err());
         assert!(table.replace_value(RecordID::NULL, &"Null".to_string()).is_err());
 
-        //GOATGOATGOAT, Do a test with create_record(), to make sure it fails if no keys are
-        //supplied, or there are any zero-length keys
+        //Test that create() returns the right error if no keys are supplied
+        assert!(table.create(&[], &"Douyoubi".to_string()).is_err());
 
-        //Recreate Saturday using the full-featured create_record() api
-        //GOATGOATGOAT, make create_record, and make the above comment true
-        let sat = table.insert("Saturday", &"Douyoubi".to_string()).unwrap();
+        //Recreate Saturday using the create() api
+        //While we're here, Also test that the same key string occurring more than once
+        // doesn't result in additional keys being added
+        let sat = table.create(&["Saturday", "Saturday"], &"Douyoubi".to_string()).unwrap();
         assert_eq!(table.keys_count(sat).unwrap(), 1);
 
         //Add some new keys to it, and verify that it can be found using any of its three keys
@@ -1585,6 +1613,12 @@ mod tests {
         let results : Vec<RecordID> = table.lookup_fuzzy_raw("Zhouliu").unwrap().collect();
         assert_eq!(results.len(), 0);
 
+        //Test that adding the same key again doesn't result in multiple copies of the key
+        table.add_keys(sat, &["Sabado"]).unwrap();
+        assert_eq!(table.keys_count(sat).unwrap(), 1);
+        table.add_keys(sat, &["Saturday", "Saturday"]).unwrap();
+        assert_eq!(table.keys_count(sat).unwrap(), 2);
+
 
         //Test that nothing breaks when we have two keys with overlapping variants, and then
         // delete one
@@ -1622,8 +1656,8 @@ mod tests {
 //GOATGOATGOAT
 //Next, Add multi-key support
 //√ 1.) Function to add a key to a record
-//2.) Function to remove a key from a record
-//3.) Function to insert a record with multiple keys
+//√ 2.) Function to remove a key from a record
+//√ 3.) Function to insert a record with multiple keys
 //√ 4.) Separate out records table into keys table and values table
 //√ 5.) Separate calls to get a value and get an iterator for keys
 //6.) Update test to insert keys for every alternative in the Geonames test
@@ -1641,8 +1675,6 @@ mod tests {
 
 //GOATGOATGOAT, Move "BinCode Helpers" into separate file
 
-//GOATGOATGOAT.  Make sure I don't create multiple copies of the same RecordID in the same variant
-//GOATGOATGOAT.  Make sure I don't add identical strings to the same record's keys
-
 //GOATGOATGOAT, Do a separate test for a ValueT of size 0
 
+//GOATGOATGOAT, Clippy, and update documentation
