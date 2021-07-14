@@ -930,6 +930,20 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         self.insert_internal(&keys_set, value)
     }
 
+    /// Retrieves a key-value pair using a RecordID
+    /// 
+    /// This is a high-level interface to be used if multiple keys are not needed, but is
+    /// functions the same as [get_one_key](Table::get_one_key) / [get_value](Table::get_value)
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn get(&self, record_id : RecordID) -> Result<(String, ValueT), String> {
+        let key = self.get_one_key(record_id)?;
+        let value = self.get_value(record_id)?;
+
+        Ok((key, value))
+    }
+
     /// Creates a new record in the table and returns the RecordID of the new record
     /// 
     /// This function will always create a new record, regardless of whether an identical key exists.
@@ -1061,6 +1075,20 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         let mut keys_set = HashSet::with_capacity(1);
         keys_set.insert(key);
         self.insert_internal(&keys_set, value)
+    }
+
+    /// Retrieves a key-value pair using a RecordID
+    /// 
+    /// This is a high-level interface to be used if multiple keys are not needed, but is
+    /// functions the same as [get_one_key](Table::get_one_key) / [get_value](Table::get_value)
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn get(&self, record_id : RecordID) -> Result<(Box<[u8]>, ValueT), String> {
+        let key = self.get_one_key(record_id)?;
+        let value = self.get_value(record_id)?;
+
+        Ok((key, value))
     }
 
     /// Creates a new record in the table and returns the RecordID of the new record
@@ -1473,7 +1501,7 @@ mod tests {
         let mon = table.insert("Monday", &"Getsuyoubi".to_string()).unwrap();
 
         //Test lookup_exact
-        let results : Vec<(String, String)> = table.lookup_exact("Friday").unwrap().map(|record_id| (table.get_one_key(record_id).unwrap(), table.get_value(record_id).unwrap())).collect();
+        let results : Vec<(String, String)> = table.lookup_exact("Friday").unwrap().map(|record_id| table.get(record_id).unwrap()).collect();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "Friday");
         assert_eq!(results[0].1, "Kinyoubi");
@@ -1494,8 +1522,7 @@ mod tests {
         //In this case, we should only get one match within edit-distance 2
         let results : Vec<(String, String, u64)> = table.lookup_fuzzy("Saturday", table.default_distance_func(), 2)
             .unwrap().map(|(record_id, distance)| {
-                let key = table.get_one_key(record_id).unwrap();
-                let val = table.get_value(record_id).unwrap();
+                let (key, val) = table.get(record_id).unwrap();
                 (key, val, distance)
             }).collect();
         assert_eq!(results.len(), 1);
@@ -1506,8 +1533,7 @@ mod tests {
         //Test lookup_fuzzy with a perfect match, but where we'll hit another imperfect match as well
         let results : Vec<(String, String, u64)> = table.lookup_fuzzy("Tuesday", table.default_distance_func(), 2)
             .unwrap().map(|(record_id, distance)| {
-                let key = table.get_one_key(record_id).unwrap();
-                let val = table.get_value(record_id).unwrap();
+                let (key, val) = table.get(record_id).unwrap();
                 (key, val, distance)
             }).collect();
         assert_eq!(results.len(), 2);
@@ -1678,14 +1704,8 @@ mod tests {
 //√ 7.) Will deprecate get_record that gets both a key and a value
 //√ 8.) Function to replace all keys on a record
 //√ 9.) Get rid of is_valid()
-//10.) provide convenience fucntion called simply "get"
+//√ 10.) provide convenience fucntion called simply "get"
 //√ 11.) API that counts the number of keys that a given record has
-
-//GOATGOATGOAT
-//IDEA: get rid of replace entirely, that can take a deleted key and re-use it.
-//√ 1. Have the table keep deleted keys in an in-memory vec that insert can reuse
-//√ 2. Have a separate replace_keys and a replace_value function, but it will error
-//  unless a valid record is provided
 
 //GOATGOATGOAT, Move "BinCode Helpers" into separate file
 
