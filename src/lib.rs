@@ -306,8 +306,6 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         Ok(())
     }
 
-    //GOATGOATGOAT, Should have a fast path that skips all value setting stuff is sizeof(ValueT) == 0
-
     /// Creates entries in the keys table
     /// If we are updating an old record, we will overwrite it.
     /// 
@@ -1619,15 +1617,27 @@ mod tests {
         table.add_keys(sat, &["Saturday", "Saturday"]).unwrap();
         assert_eq!(table.keys_count(sat).unwrap(), 2);
 
-
         //Test that nothing breaks when we have two keys with overlapping variants, and then
         // delete one
-        //GOATGOATGOAT
+        // "Venerdi" & "Vendredi" have overlapping variant: "Venedi"
+        table.add_keys(fri, &["Geumyoil", "Viernes", "Venerdi", "Vendredi"]).unwrap();
+        assert_eq!(table.keys_count(fri).unwrap(), 5);
+        table.remove_keys(fri, &["Vendredi"]).unwrap();
+        assert_eq!(table.keys_count(fri).unwrap(), 4);
+        let results : Vec<RecordID> = table.lookup_fuzzy_raw("Vendredi").unwrap().collect();
+        assert_eq!(results.len(), 1); //We'll still get Venerdi as a fuzzy match
 
-        // //Test the fast-path of the replace method, when the keys are identical
-        // table.replace(fri, "Friday", &"Geumyoil".to_string()).unwrap();
-        // assert_eq!(table.get_one_key(fri).unwrap(), "Friday");
-        // assert_eq!(table.get_value(fri).unwrap(), "Geumyoil");
+        //Try deleting the non-existent key with valid variants, to make sure nothing breaks
+        table.remove_keys(fri, &["Vendredi"]).unwrap();
+        let results : Vec<RecordID> = table.lookup_fuzzy_raw("Vendredi").unwrap().collect();
+        assert_eq!(results.len(), 1); //We'll still get Venerdi as a fuzzy match
+        assert_eq!(table.keys_count(fri).unwrap(), 4);
+
+        //Finally delete "Venerdi", and make sure the variants are all gone
+        table.remove_keys(fri, &["Venerdi"]).unwrap();
+        let results : Vec<RecordID> = table.lookup_fuzzy_raw("Vendredi").unwrap().collect();
+        assert_eq!(results.len(), 0);
+        assert_eq!(table.keys_count(fri).unwrap(), 3);
 
     }
 
