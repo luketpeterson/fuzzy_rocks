@@ -124,6 +124,9 @@ use std::iter::FromIterator;
 
 use rocksdb::{DB, DBWithThreadMode, ColumnFamily, ColumnFamilyDescriptor, MergeOperands};
 
+//GOATGOATGOAT, Internal functions that accept slices of keys could instead accept iterators to save
+//on allocations
+
 /// A collection containing records that may be searched by `key`
 /// 
 /// -`MAX_DELETES` is the number of deletes to store in the database for variants created
@@ -397,6 +400,12 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
             }
         }
         
+        //If we're left with no remaining keys, we should throw an error because all records must
+        //have at least one key
+        if remaining_keys.len() < 1 {
+            return Err("cannot remove all keys from record".to_string());
+        }
+
         //Compute all variants for the keys we're removing
         let mut remove_keys_variants = HashSet::new();
         for remove_key in raw_keys {
@@ -428,6 +437,10 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     ///
     /// NOTE: This function will NOT update any variants used to locate the key
     fn replace_keys_internal(&mut self, record_id : RecordID, raw_keys : &[&[u8]]) -> Result<(), String> {
+
+        if raw_keys.len() < 1 {
+            return Err("record must have at least one key".to_string());
+        }
 
         self.delete_keys_internal(record_id)?;
         self.put_key_variants_internal(record_id, raw_keys)?;
@@ -484,6 +497,10 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     fn insert_internal(&mut self, raw_keys : &[&[u8]], value : &ValueT, supplied_id : Option<RecordID>) -> Result<RecordID, String> {
+
+        if raw_keys.len() < 1 {
+            return Err("record must have at least one key".to_string());
+        }
 
         let new_record_id = match supplied_id {
             None => {
@@ -915,6 +932,9 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// If one of the specified keys is not associated with the record then that specified
     /// key will be ignored.
     /// 
+    /// If removing the keys would result in a record with no keys, this operation will return
+    /// an error and no keys will be removed, because all records must have at least one key.
+    /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn remove_keys(&mut self, record_id : RecordID, keys : &[&str]) -> Result<(), String> {
@@ -1027,6 +1047,9 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// If one of the specified keys is not associated with the record then that specified
     /// key will be ignored.
+    /// 
+    /// If removing the keys would result in a record with no keys, this operation will return
+    /// an error and no keys will be removed, because all records must have at least one key.
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
@@ -1482,6 +1505,9 @@ mod tests {
         assert!(table.replace_keys(sat, &["Sabado"]).is_err());
         assert!(table.replace_value(sat, &"Zhouliu".to_string()).is_err());
 
+        //Attempt to replace a record's keys with an empty list, check the error
+        assert!(table.replace_keys(sat, &[]).is_err());
+        
         //Attempt to replace an invalid record and confirm we get a reasonable error
         assert!(table.replace_keys(RecordID::NULL, &["Nullday"]).is_err());
         assert!(table.replace_value(RecordID::NULL, &"Null".to_string()).is_err());
@@ -1489,6 +1515,9 @@ mod tests {
         //Recreate Saturday using the full-featured create_record() api
         //GOATGOATGOAT, make create_record, and make the above comment true
         let sat = table.insert("Saturday", &"Douyoubi".to_string()).unwrap();
+
+        //GOATGOATGOAT, Do a test with create_record(), to make sure it fails if no keys are
+        //supplied, or there are any zero-length keys
 
         //Add some new keys to it, and verify that it can be found using any of its three keys
         table.add_keys(sat, &["Sabado", "Zhouliu"]).unwrap();
@@ -1515,6 +1544,13 @@ mod tests {
         let results : Vec<RecordID> = table.lookup_exact("Zhouliu").unwrap().collect();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], sat);
+
+        //Attempt to remove the remaining keys and ensure we get an error and both keys remain
+        assert!(table.remove_keys(sat, &["Saturday", "Zhouliu"]).is_err());
+        let results : Vec<RecordID> = table.lookup_exact("Saturday").unwrap().collect();
+        assert_eq!(results.len(), 1);
+        let results : Vec<RecordID> = table.lookup_exact("Zhouliu").unwrap().collect();
+        assert_eq!(results.len(), 1);
 
 
 //GOATGOAT, Replace a record that has multiple keys with a single key
