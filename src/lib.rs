@@ -615,8 +615,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
                         let record_keys_vec : Vec<Vec<u8>> = record_coder.deserialize(&key_vec_bytes).unwrap();
     
                         //If the full key in the DB matches the key we're checking return the RecordID
-                        //GOATGOATGOAT, Don't want to make a copy of the key
-                        if record_keys_vec.contains(&raw_key.to_owned()) {
+                        if record_keys_vec.into_iter().any(|key| key == *raw_key) {
                             Some(RecordID(usize::from_le_bytes(record_id_bytes.try_into().unwrap())))
                         } else {
                             None
@@ -987,7 +986,9 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn get_keys(&self, record_id : RecordID) -> Result<impl Iterator<Item=String>, String> {
-        Ok(self.get_keys_internal(record_id)?.map(|key| String::from_utf8(key.to_vec()).unwrap())) //GOATGOAT, we can rely on this being valid and therefore use unchecked
+        Ok(self.get_keys_internal(record_id)?.map(|key| {
+            unsafe{ String::from_utf8_unchecked(key.to_vec()) }
+        }))
     }
 
     /// Returns one key associated with the specified record.  If the record has more than one key
@@ -998,7 +999,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     pub fn get_one_key(&self, record_id : RecordID) -> Result<String, String> {
         //TODO: Perhaps we can speed this up in the future by avoiding deserializing all keys
         let first_key = self.get_keys_internal(record_id)?.next().unwrap();
-        Ok(String::from_utf8(first_key.to_vec()).unwrap()) //GOATGOAT, we can rely on this being valid and therefore use unchecked
+        Ok(unsafe{ String::from_utf8_unchecked(first_key.to_vec()) } )
     }
 
     /// Locates all records in the table with keys that precisely match the key supplied
