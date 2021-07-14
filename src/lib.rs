@@ -97,12 +97,24 @@
 //! ## Performance Characteristics
 //! 
 //! This crate is designed for large databases where startup time and resident memory footprint are significant
-//! considerations.  This create has been tested with 250,000 unique keys and about 10 million variants.
+//! considerations.  This create has been tested with 200,000 records cumulatively having over 1 million keys,
+//! and about 140 million key variants.  In this situation, a fuzzy lookup was about 500 microseconds running
+//! on my laptop - which is very expensive in absolute terms.
+//! 
+//! The performance will also vary greatly depending on the key distribution and the table parameters.  Keys
+//! that are distinct from eachother will lead to faster searches vs. keys that share many variants in common.
+//! 
+//! A smaller `MAX_DELETES` value will perform better but be able to find fewer results for a search.
+//! 
+//! A higher value for `MEANINGFUL_KEY_LEN` will result in fewer wasted evaluations of the distance function
+//! but will lead to more entries in the variants database and thus more memory pressure.
 //! 
 //! If your use-case can cope with a higher startup latency and you are ok with all of your keys and
 //! variants being loaded into memory, then query performance will certainly be better using a solution
 //! built on Rust's native collections, such as this [symspell](https://crates.io/crates/symspell)
 //! crate on [crates.io](http://crates.io).
+//! 
+//! ## Misc
 //! 
 //! **NOTE**: The included `geonames_megacities.txt` file is a stub for the `geonames_test`, designed to stress-test
 //! this crate.  The abriged file is included so the test will pass regardless, and to avoid bloating the
@@ -1404,6 +1416,10 @@ mod tests {
 
         let mut geonames_file_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         geonames_file_path.push("geonames_megacities.txt");
+        
+        // Alternate geonames file
+        // NOTE: Uncomment this to use a different file
+        // let geonames_file_path = PathBuf::from("/path/to/file/cities500.txt");
     
         //Create the FuzzyRocks Table, and clear out any records that happen to be hanging out
         let mut table = Table::<i32, 2, 12, true>::new("geonames.rocks").unwrap();
