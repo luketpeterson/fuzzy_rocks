@@ -5,7 +5,7 @@
 //! distance function accelerated by the [SymSpell](https://github.com/wolfgarbe/SymSpell) algorithm.
 //! 
 //! The reasons to use this crate over another SymSpell implementation are:
-//! - You need to use a custom distance function
+//! - You want to use a custom distance function
 //! - Startup time matters more than lookups-per-second
 //! - You care about resident memory footprint
 //! 
@@ -1416,7 +1416,7 @@ mod tests {
 
         let mut geonames_file_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         geonames_file_path.push("geonames_megacities.txt");
-        
+
         // Alternate geonames file
         // NOTE: Uncomment this to use a different file
         // let geonames_file_path = PathBuf::from("/path/to/file/cities500.txt");
@@ -1718,6 +1718,49 @@ mod tests {
     }
 }
 
+
+//TODO: Ideas for preformance counters.
+//
+//A. Active Record Count
+//B. Total number of keys, across all records
+//C. Average keys / record = B / A
+//
+//D. Total number entries in the variants DB (number of vecs in the VariantsCF of the DB)
+//E. Total number of variant references (Cumulative number of RecordIDs stored across all variants)
+//F. Average number of RecordIDs per variant entry = E / D
+//
+//G. Total number of fuzzy queries issued (that invoke a distance function)
+//H. Total number of distance function invocations
+//I. Average number of distance function invocations per query H / G
+//
+//J. Maximum number of RecordIDs in a single variant entry
+//
+
+//TODO: Add a benchmarking harness, and start optimizing.
+
+//QUESTION: Could we sort the variants by the number of removes, with the idea being that we'd
+// check the closer matches first, and possibly avoid the need for checking the other matches?
+//ANSWER: No.  Sadly that doesn't buy us anything because we can't guarentee the distance function
+// correlates to the number of removes.  But we can guarentee that precisely the same pattern will
+// have distance zero to itself.  So basically exact matches are a special case, but otherwise we
+// need to try all variants.
+
+//GOATGOATGOAT, Fast path to return from lookup_best as soon as we get to a distance of zero... Perhaps a better
+// implementation is to check for exactly the query string before iterating the variants.
+//
+//GOATGOATGOAT.  lookup_best should also return an iterator, it just should only iterate over the values that
+// are equal to the best value
+//
+//GOATGOATGOAT.  Check to see if we have a zero-length variant pathological case
+//
+//GOATGOATGOAT, If we have a hot spot on the distance function.
+// we can reduce the number of times it's called by first computing the keys that overlap with the
+// variants in our query and testing only those keys.  I think the preflight test to check variant overlap
+// is essentially the same as the edit_distance function, except that we can early-out a lot of the loops
+// when they reach MAX_DELETES.
+
+// And if we have only one key, we can skip that preflight step.
+//
 
 //GOATGOATGOAT
 //Next, Add multi-key support
