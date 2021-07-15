@@ -1718,7 +1718,11 @@ mod tests {
     }
 }
 
-
+//GOATGOATGOAT: Make the Perf counters a separate feature that can be enabled through a compile-time
+//  switch.
+//
+//include a table.reset_counters() method
+//
 //TODO: Ideas for preformance counters.
 //
 //A. Active Record Count
