@@ -94,6 +94,18 @@
 //! If `UNICODE_KEYS` is `false`, keys are just strings of [u8] characters.
 //! This option has better performance.
 //! 
+//! ## Algorithm Details
+//! 
+//! The authoritative description of SymSpell is the ReadMe for the [SymSpell project](https://github.com/wolfgarbe/SymSpell).
+//! 
+//! The fuzzy_rocks implementation has a few additional details to be aware of:
+//! 
+//! - fuzzy_rocks won't find keys that don't have at least one character in common, regardless of the value
+//! of `MAX_DELETES`.  For example the key `of` won't be found by the query string `hi`, even with a distance
+//! of 2 (or any other value).  This decision was made because the variant space becomes very crowded near
+//! for short keys, and the extreme example of the empty-string variant was severely damaging performance with
+//! short keys.
+//! 
 //! ## Performance Characteristics
 //! 
 //! This crate is designed for large databases where startup time and resident memory footprint are significant
@@ -777,14 +789,19 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
             Some(existing_variants) => existing_variants,
             None => HashSet::new()
         };
-
-        let meaningful_key = Self::meaningful_key_substring(key);
-
-        if 0 < MAX_DELETES {
-            Self::variants_recursive(&meaningful_key[..], 0, &mut variants_set);
-        }
-        variants_set.insert(meaningful_key);
         
+        //We shouldn't make any variants for empty keys
+        if key.len() > 0 {
+
+            //We'll only build variants from the meaningful portion of the key
+            let meaningful_key = Self::meaningful_key_substring(key);
+
+            if 0 < MAX_DELETES {
+                Self::variants_recursive(&meaningful_key[..], 0, &mut variants_set);
+            }
+            variants_set.insert(meaningful_key);    
+        }
+
         variants_set
     }
     
@@ -1716,6 +1733,22 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], one);
     }
+
+    #[test]
+    /// This tests the perf-counters
+    fn perf_counters_test() {
+
+        //Initialize the table with a very big database
+        let table = Table::<i32, 2, 12, true>::new("all_cities.geonames.rocks").unwrap();
+
+        //Make sure we have no pathological case of a variant for a zero-length string
+        let iter = table.lookup_fuzzy_raw("").unwrap();
+        assert_eq!(iter.count(), 0);
+
+        
+
+    }
+
 }
 
 //GOATGOATGOAT: Make the Perf counters a separate feature that can be enabled through a compile-time
@@ -1740,7 +1773,7 @@ mod tests {
 //J. Maximum number of RecordIDs in a single variant entry
 //
 
-//TODO: Add a benchmarking harness, and start optimizing.
+
 
 //QUESTION: Could we sort the variants by the number of removes, with the idea being that we'd
 // check the closer matches first, and possibly avoid the need for checking the other matches?
@@ -1755,7 +1788,6 @@ mod tests {
 //GOATGOATGOAT.  lookup_best should also return an iterator, it just should only iterate over the values that
 // are equal to the best value
 //
-//GOATGOATGOAT.  Check to see if we have a zero-length variant pathological case
 //
 //GOATGOATGOAT, If we have a hot spot on the distance function.
 // we can reduce the number of times it's called by first computing the keys that overlap with the

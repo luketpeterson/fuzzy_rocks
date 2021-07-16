@@ -15,6 +15,16 @@ pub fn london_lookup_benchmark(c: &mut Criterion) {
         let _iter = table.lookup_exact("tokyo").unwrap();
     })));
 
+    c.bench_function("lookup_raw_london", |b| b.iter(|| black_box( {
+        let iter = table.lookup_fuzzy_raw("london").unwrap();
+        let _ = iter.count();
+    })));
+
+    c.bench_function("lookup_raw_tokyo", |b| b.iter(|| black_box( {
+        let iter = table.lookup_fuzzy_raw("tokyo").unwrap();
+        let _ = iter.count();
+    })));
+
     c.bench_function("lookup_best_london", |b| b.iter(|| black_box( {
         let _iter = table.lookup_best("london", table.default_distance_func()).unwrap();
     })));
@@ -53,6 +63,9 @@ criterion_main!(benches);
 
 //Interesting observations:
 
+//NOTE: invoke flamegraph in criterion with:
+// sudo cargo flamegraph --bench lookups -- --bench lookup_best_tokyo
+
 //* QUESTION: lookup_best is **much** slower compared with lookup_fuzzy.  Like 100x slower.  But both
 //should do almost the same amount of work...  What gives??
 // ANSWER: It turns out that lookup_best evaluates the distance function for every result, while
@@ -69,3 +82,4 @@ criterion_main!(benches);
 //Should confirm with perf counters
 
 
+//GOATGOATGOAT.  It looks like one of the biggest things I can do for performance is to allocate the edit_distance buffer thingy on the stack
