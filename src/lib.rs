@@ -139,6 +139,9 @@ use core::borrow::Borrow;
 use core::cmp::min;
 use core::hash::Hash;
 
+#[cfg(feature = "perf_counters")]
+use core::cell::Cell;
+
 use num_traits::Zero;
 
 use serde::{Serialize, Deserialize};
@@ -184,7 +187,33 @@ pub struct Table<ValueT : Serialize + serde::de::DeserializeOwned, const MAX_DEL
     db : DBWithThreadMode<rocksdb::SingleThreaded>,
     path : String,
     deleted_records : Vec<RecordID>, //NOTE: Currently we don't try to hold onto deleted records across unloads, but we may change this in the future.
+    #[cfg(feature = "perf_counters")]
+    perf_counters : Cell<PerfCounters>,
     phantom: PhantomData<ValueT>,
+}
+
+/// Performance counters for optimizing [Table] parameters.
+/// 
+/// These counters don't reflect stats and totals across the whole database, rather they can
+/// be reset and therefore used to measure individual operations or sequences of operations.
+/// 
+/// NOTE: Counters are being implemented on an as-needed basis, and many are still unimplimented
+#[cfg(feature = "perf_counters")]
+#[derive(Debug, Copy, Clone)]
+struct PerfCounters {
+
+    keys_lookup_count : usize, //The number of time we load the keys for a record
+    max_variant_entry_refs : usize, // The number of RecordIDs in the variant with the most RecordIDs, among all variants loaded during lookups
+}
+
+#[cfg(feature = "perf_counters")]
+impl PerfCounters {
+    pub fn new() -> Self {
+        Self {
+            keys_lookup_count : 0,
+            max_variant_entry_refs : 0,
+        }
+    }
 }
 
 /// A unique identifier for a record within a [Table]
@@ -237,6 +266,8 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
             db,
             path : path.to_string(),
             deleted_records : vec![],
+            #[cfg(feature = "perf_counters")]
+            perf_counters : Cell::new(PerfCounters::new()),
             phantom : PhantomData
         })
     }
@@ -314,7 +345,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
 
                 let variant_entry_len = bincode_vec_fixint_len(&variant_entry_bytes);
 
-                //If the variant entry references more than one record, rebuild it with our record absent
+                //If the variant entry references more than one record, rebuild it with our records absent
                 if variant_entry_len > 1 {
                     let mut new_vec : Vec<RecordID> = Vec::with_capacity(variant_entry_len-1);
                     for record_id_bytes in bincode_vec_iter::<RecordID>(&variant_entry_bytes) {
@@ -554,9 +585,20 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         //Check to see if we have entries in the "variants" database for any of the key variants
         let variants_cf_handle = self.db.cf_handle(VARIANTS_CF_NAME).unwrap();
         for variant in variants {
+            // See if we have an entry in the variants database
             if let Some(variant_vec_bytes) = self.db.get_pinned_cf(variants_cf_handle, variant)? {
 
-                //If we have an entry in the variants database, add all of the referenced RecordIDs to our results
+                #[cfg(feature = "perf_counters")]
+                {
+                    let num_record_ids = bincode_vec_fixint_len(&variant_vec_bytes);
+                    let mut perf_counters = self.perf_counters.get();
+                    if perf_counters.max_variant_entry_refs < num_record_ids {
+                        perf_counters.max_variant_entry_refs = num_record_ids;
+                        self.perf_counters.set(perf_counters);
+                    }
+                }
+        
+                // add all of the referenced RecordIDs to our results
                 for record_id_bytes in bincode_vec_iter::<RecordID>(&variant_vec_bytes) {
                     result_set.insert(RecordID(usize::from_le_bytes(record_id_bytes.try_into().unwrap())));
                 }
@@ -626,39 +668,36 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     fn lookup_exact_internal<'a>(&'a self, raw_key : &'a [u8]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
 
         let meaningful_key = Self::meaningful_key_substring(raw_key);
+        let meaningful_noop = meaningful_key.len() == raw_key.len();
 
-        let keys_cf_handle = self.db.cf_handle(KEYS_CF_NAME).unwrap();
+        //Get the variant for our meaningful_key
         let variants_cf_handle = self.db.cf_handle(VARIANTS_CF_NAME).unwrap();
         if let Some(variant_vec_bytes) = self.db.get_pinned_cf(variants_cf_handle, meaningful_key)? {
 
-            let record_id_iter = bincode_vec_iter::<RecordID>(&variant_vec_bytes)
+            //NOTE: Clippy complains about this collect() followed by into_iter(), but Clippy doesn't seem
+            // to understand that we have different iterator types
+            #[allow(clippy::needless_collect)] 
+            let record_ids : Vec<RecordID> = if meaningful_noop {
+
+                //If the meaningful_key exactly equals our key, we can just return the variant's results
+                bincode_vec_iter::<RecordID>(&variant_vec_bytes).map(|record_id_bytes| RecordID(usize::from_le_bytes(record_id_bytes.try_into().unwrap()))).collect()
+            } else {
+
+                //But if they are different, we need to Iterate every RecordID in the variant in order
+                //  to check if we really have a match on the whole key
+                bincode_vec_iter::<RecordID>(&variant_vec_bytes)
                 .filter_map(|record_id_bytes| {
+                    let record_id = RecordID(usize::from_le_bytes(record_id_bytes.try_into().unwrap()));
                     
                     // Return only the RecordIDs for records if their keys match the key we are looking up
-                    if let Some(key_vec_bytes) = self.db.get_pinned_cf(keys_cf_handle, record_id_bytes).unwrap() {
-
-                        //Decode the record's keys
-                        let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
-                        let record_keys_vec : Vec<Vec<u8>> = record_coder.deserialize(&key_vec_bytes).unwrap();
-    
-                        //If the full key in the DB matches the key we're checking return the RecordID
-                        if record_keys_vec.into_iter().any(|key| key == *raw_key) {
-                            Some(RecordID(usize::from_le_bytes(record_id_bytes.try_into().unwrap())))
-                        } else {
-                            None
-                        }
+                    let mut keys_iter = self.get_keys_internal(record_id).ok()?;
+                    if keys_iter.any(|key| *key == *raw_key) {
+                        Some(record_id)
                     } else {
-                        panic!("Internal Error: bad record_id in variant");
+                        None
                     }
-                });
-
-            //I guess it's simpler (and more efficeint) to assemble the results in a vec than to try
-            // and keep the iterator machinations alive outside this function
-            //
-            //NOTE: Clippy complains about this, but Clippy doesn't seem to understand that this iterator
-            //can't live outside of this function
-            #[allow(clippy::needless_collect)] 
-            let record_ids : Vec<RecordID> = record_id_iter.collect();
+                }).collect()
+            };
 
             Ok(record_ids.into_iter())
 
@@ -713,6 +752,13 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     fn get_keys_internal(&self, record_id : RecordID) -> Result<impl Iterator<Item=Box<[u8]>>, String> {
+
+        #[cfg(feature = "perf_counters")]
+        {
+            let mut perf_counters = self.perf_counters.get();
+            perf_counters.keys_lookup_count += 1;
+            self.perf_counters.set(perf_counters);
+        }
 
         //Get the keys vec by deserializing the bytes from the db
         let keys_cf_handle = self.db.cf_handle(KEYS_CF_NAME).unwrap();
@@ -941,6 +987,11 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         }
 
         d[m-1][n-1] as u64
+    }
+
+    #[cfg(feature = "perf_counters")]
+    pub fn reset_perf_counters(&mut self) {
+        self.perf_counters.set(PerfCounters::new());
     }
 }
 
@@ -1515,6 +1566,10 @@ mod tests {
         let london_results : Vec<i32> = table.lookup_exact("london").unwrap().map(|record_id| table.get_value(record_id).unwrap()).collect();
         assert!(london_results.contains(&2643743)); //2643743 is the geonames_id of "London"
 
+        //Confirm we can find a known city with a longer key name (not on the fast-path)
+        let rio_results : Vec<i32> = table.lookup_exact("rio de janeiro").unwrap().map(|record_id| table.get_value(record_id).unwrap()).collect();
+        assert!(rio_results.contains(&3451190)); //3451190 is the geonames_id of "Rio de Janeiro"
+
         //Close RocksDB connection by dropping the table object
         drop(table);
         drop(london_results);
@@ -1739,40 +1794,32 @@ mod tests {
     fn perf_counters_test() {
 
         //Initialize the table with a very big database
-        let table = Table::<i32, 2, 12, true>::new("all_cities.geonames.rocks").unwrap();
+        let mut table = Table::<i32, 2, 12, true>::new("all_cities.geonames.rocks").unwrap();
 
         //Make sure we have no pathological case of a variant for a zero-length string
         let iter = table.lookup_fuzzy_raw("").unwrap();
         assert_eq!(iter.count(), 0);
 
+        #[cfg(feature = "perf_counters")]
+        {
+            //Get the perf counters for some operations we can predict
+            table.reset_perf_counters();
+
+            //Make sure we are on the fast path that doesn't fetch the keys for the 
+            let _iter = table.lookup_exact("london").unwrap();
+            assert_eq!(table.perf_counters.get().keys_lookup_count, 0);
+
+        }
         
+        #[cfg(not(feature = "perf_counters"))]
+        {
+            println!("perf_counters feature not enabled");
+        }
+
 
     }
 
 }
-
-//GOATGOATGOAT: Make the Perf counters a separate feature that can be enabled through a compile-time
-//  switch.
-//
-//include a table.reset_counters() method
-//
-//TODO: Ideas for preformance counters.
-//
-//A. Active Record Count
-//B. Total number of keys, across all records
-//C. Average keys / record = B / A
-//
-//D. Total number entries in the variants DB (number of vecs in the VariantsCF of the DB)
-//E. Total number of variant references (Cumulative number of RecordIDs stored across all variants)
-//F. Average number of RecordIDs per variant entry = E / D
-//
-//G. Total number of fuzzy queries issued (that invoke a distance function)
-//H. Total number of distance function invocations
-//I. Average number of distance function invocations per query H / G
-//
-//J. Maximum number of RecordIDs in a single variant entry
-//
-
 
 
 //QUESTION: Could we sort the variants by the number of removes, with the idea being that we'd
@@ -1794,7 +1841,7 @@ mod tests {
 // variants in our query and testing only those keys.  I think the preflight test to check variant overlap
 // is essentially the same as the edit_distance function, except that we can early-out a lot of the loops
 // when they reach MAX_DELETES.
-
+//
 // And if we have only one key, we can skip that preflight step.
 //
 

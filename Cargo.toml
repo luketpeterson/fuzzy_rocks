@@ -26,3 +26,7 @@ criterion = "0.3"
 name = "lookups"
 harness = false
 
+[features]
+#default = ["perf_counters"]
+perf_counters = []
+
