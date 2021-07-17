@@ -117,6 +117,11 @@
 //! The performance will also vary greatly depending on the key distribution and the table parameters.  Keys
 //! that are distinct from eachother will lead to faster searches vs. keys that share many variants in common.
 //! 
+//! GOATGOATGOAT, DO a write-up on when to use multiple keys vs. when to use multiple records.  Big data = multiple keys
+//! Similar keys (variants of the same spelling) = multiple keys.  disjoint keys and small "value" type might be better off with multiple records.
+//! 
+//! GOATGOATGOAT, Write-up on perf_counters, how to enable, etc.
+//! 
 //! A smaller `MAX_DELETES` value will perform better but be able to find fewer results for a search.
 //! 
 //! A higher value for `MEANINGFUL_KEY_LEN` will result in fewer wasted evaluations of the distance function
@@ -203,7 +208,9 @@ pub struct Table<ValueT : Serialize + serde::de::DeserializeOwned, const MAX_DEL
 #[derive(Debug, Copy, Clone)]
 struct PerfCounters {
 
+    variant_load_count : usize, //The number of times we load a variant entry from the DB during a fuzzy lookup
     keys_lookup_count : usize, //The number of time we load the keys for a record
+    keys_found_count : usize, //The number of keys we find across all records we lookup the keys for
     max_variant_entry_refs : usize, // The number of RecordIDs in the variant with the most RecordIDs, among all variants loaded during lookups
 }
 
@@ -211,7 +218,9 @@ struct PerfCounters {
 impl PerfCounters {
     pub fn new() -> Self {
         Self {
+            variant_load_count : 0,
             keys_lookup_count : 0,
+            keys_found_count : 0,
             max_variant_entry_refs : 0,
         }
     }
@@ -593,10 +602,11 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
                 {
                     let num_record_ids = bincode_vec_fixint_len(&variant_vec_bytes);
                     let mut perf_counters = self.perf_counters.get();
+                    perf_counters.variant_load_count += 1;
                     if perf_counters.max_variant_entry_refs < num_record_ids {
                         perf_counters.max_variant_entry_refs = num_record_ids;
-                        self.perf_counters.set(perf_counters);
                     }
+                    self.perf_counters.set(perf_counters);
                 }
         
                 // add all of the referenced RecordIDs to our results
@@ -767,18 +777,19 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// unwrapped RocksDB error.
     fn get_keys_internal(&self, record_id : RecordID) -> Result<impl Iterator<Item=Box<[u8]>>, String> {
 
-        #[cfg(feature = "perf_counters")]
-        {
-            let mut perf_counters = self.perf_counters.get();
-            perf_counters.keys_lookup_count += 1;
-            self.perf_counters.set(perf_counters);
-        }
-
         //Get the keys vec by deserializing the bytes from the db
         let keys_cf_handle = self.db.cf_handle(KEYS_CF_NAME).unwrap();
         if let Some(keys_vec_bytes) = self.db.get_pinned_cf(keys_cf_handle, record_id.0.to_le_bytes())? {
             let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
             let keys_vec : Vec<Box<[u8]>> = record_coder.deserialize(&keys_vec_bytes).unwrap();
+
+            #[cfg(feature = "perf_counters")]
+            {
+                let mut perf_counters = self.perf_counters.get();
+                perf_counters.keys_lookup_count += 1;
+                perf_counters.keys_found_count += keys_vec.len();
+                self.perf_counters.set(perf_counters);
+            }    
 
             if keys_vec.len() > 0 {
                 Ok(keys_vec.into_iter())
@@ -1819,13 +1830,26 @@ mod tests {
 
         #[cfg(feature = "perf_counters")]
         {
-            //Get the perf counters for some operations we can predict
-            table.reset_perf_counters();
-
             //Make sure we are on the fast path that doesn't fetch the keys for the 
+            table.reset_perf_counters();
             let _iter = table.lookup_exact("london").unwrap();
             assert_eq!(table.perf_counters.get().keys_lookup_count, 0);
 
+
+            //GOATGOATGOAT, Create `MINGLE_KEYS` flag to implement old behavior.
+            //  use bottom 40 bits to store unique record locator in the values table, use top 24 bits
+            //  to store key index.
+            //
+
+            //Test that the other counters do something...
+            table.reset_perf_counters();
+            let iter = table.lookup_fuzzy("london", table.default_distance_func(), 3).unwrap();
+            let _ = iter.count();
+            assert!(table.perf_counters.get().variant_load_count > 0);
+            assert!(table.perf_counters.get().keys_lookup_count > 0);
+            assert!(table.perf_counters.get().keys_found_count > 0);
+            assert!(table.perf_counters.get().max_variant_entry_refs > 0);
+            
         }
         
         #[cfg(not(feature = "perf_counters"))]
