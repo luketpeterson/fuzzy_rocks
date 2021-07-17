@@ -33,12 +33,12 @@ pub fn london_lookup_benchmark(c: &mut Criterion) {
         let _ = iter.count();
     })));
 
-    c.bench_function("lookup_best_london", |b| b.iter(|| black_box( {
+    c.bench_function("lookup_best_exact_london", |b| b.iter(|| black_box( {
         let _iter = table.lookup_best("london", table.default_distance_func()).unwrap();
     })));
 
-    c.bench_function("lookup_best_tokyo", |b| b.iter(|| black_box( {
-        let _iter = table.lookup_best("tokyo", table.default_distance_func()).unwrap();
+    c.bench_function("lookup_best_inexact_london", |b| b.iter(|| black_box( {
+        let _iter = table.lookup_best("Rondon", table.default_distance_func()).unwrap();
     })));
 
     //Perform a fuzzy lookup, but stop after we get the first result 
@@ -71,7 +71,7 @@ criterion_main!(benches);
 //NOTE: invoke flamegraph in criterion with:
 // sudo cargo flamegraph --bench lookups -- --bench lookup_best_tokyo
 
-//Interesting observations:
+//Solved Mysteries:
 //
 //* lookup_best is **much** slower compared with lookup_fuzzy.  Like 100x slower.  But both
 //should do almost the same amount of work...  What gives??
@@ -86,11 +86,21 @@ criterion_main!(benches);
 //  the record keys if the meaningful substring didn't shorten the lookup key, which gave a 4x
 //  speedup to "tokyo", and a 25x speedup to "london".
 //
+//* Could we sort the variants by the number of removed characters, with the idea being that we'd
+// check the closer matches first, and possibly avoid the need for checking the other matches?
+//ANSWER: No.  Sadly that doesn't buy us anything because we can't guarentee the distance function
+// correlates to the number of removes.  But we can guarentee that precisely the same pattern will
+// have distance zero to itself.  So basically exact matches are a special case, but otherwise we
+// need to try all variants.  I added an optimization to call lookup_exact first inside the
+// implementation of lookup_best()
 //
-//* "london" has a better lookup_best speed vs. "tokyo" (~5ms vs 8ms), maybe because "tokyo"
-//  is a shorter name and therefore has a lot more variants that end up hitting DB entries
-//
-//Should confirm with perf counters
 
+//Unsolved Mysteries: (with Robert Stack)
+
+// GOATGOATGOAT.  lookup_best_inexact_london benchmark is twice as fast as lookup_fuzzy_all_london, but 
+//  they're doing the same work.  Get to the bottom of why using counters.
+//
+// +counter to count the number of variants loaded
+//
 
 //GOATGOATGOAT.  It looks like one of the biggest things I can do for performance is to allocate the edit_distance buffer thingy on the stack

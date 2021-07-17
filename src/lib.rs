@@ -31,7 +31,8 @@
 //! let mon = table.insert("Monday", &"Getsuyoubi".to_string()).unwrap();
 //! 
 //! //Try out lookup_best, to get the closest fuzzy match
-//! let result = table.lookup_best("Bonday", table.default_distance_func()).unwrap();
+//! let result = table.lookup_best("Bonday", table.default_distance_func())
+//!     .unwrap().next().unwrap();
 //! assert_eq!(result, mon);
 //! 
 //! //Try out lookup_fuzzy, to get all matches and their distances
@@ -645,27 +646,43 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         )
     }
 
-    fn lookup_best_internal<D : 'static + Copy + Zero + PartialOrd, F : Fn(&[u8], &[u8])->D>(&self, raw_key : &[u8], distance_function : F) -> Result<RecordID, String> {
+    fn lookup_best_internal<'a, D : 'static + Copy + Zero + PartialOrd, F : 'a + Fn(&[u8], &[u8])->D>(&'a self, raw_key : &'a [u8], distance_function : F) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
+
+        //First, we should check to see if lookup_exact gives us what we want.  Because if it does,
+        // it's muuuuuuch faster.  If we have an exact result, no other key will be a better match
+        let mut results_vec = self.lookup_exact_internal(raw_key)?;
+        if results_vec.len() > 0 {
+            return Ok(results_vec.into_iter());
+        }
+        
+        //Assuming lookup_exact didn't work, we'll need to perform the whole fuzzy lookup and iterate each key
+        //to figure out the closest distance
         let mut result_iter = self.lookup_fuzzy_internal(raw_key, distance_function, None)?;
         
         if let Some(first_result) = result_iter.next() {
-            let mut best_result = first_result;
+            let mut best_distance = first_result.1;
+            results_vec.push(first_result.0);
             for result in result_iter {
-                if result.1 < best_result.1 {
-                    best_result = result;
+                if result.1 == best_distance {
+                    results_vec.push(result.0);
+                } else if result.1 < best_distance {
+                    //We've found a shorter distance, so drop the results_vec and start a new one
+                    best_distance = result.1;
+                    results_vec = vec![];
+                    results_vec.push(result.0);
                 }
             }
 
-            return Ok(best_result.0);
+            return Ok(results_vec.into_iter());
         }
 
-        Err("No Matching Record Found".to_string())
+        Ok(vec![].into_iter())
     }
 
     /// Checks the table for records with keys that precisely match the key supplied
     /// 
     /// This function will be more efficient than a fuzzy lookup.
-    fn lookup_exact_internal<'a>(&'a self, raw_key : &'a [u8]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
+    fn lookup_exact_internal(&self, raw_key : &[u8]) -> Result<Vec<RecordID>, String> {
 
         let meaningful_key = Self::meaningful_key_substring(raw_key);
         let meaningful_noop = meaningful_key.len() == raw_key.len();
@@ -674,9 +691,6 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         let variants_cf_handle = self.db.cf_handle(VARIANTS_CF_NAME).unwrap();
         if let Some(variant_vec_bytes) = self.db.get_pinned_cf(variants_cf_handle, meaningful_key)? {
 
-            //NOTE: Clippy complains about this collect() followed by into_iter(), but Clippy doesn't seem
-            // to understand that we have different iterator types
-            #[allow(clippy::needless_collect)] 
             let record_ids : Vec<RecordID> = if meaningful_noop {
 
                 //If the meaningful_key exactly equals our key, we can just return the variant's results
@@ -699,12 +713,12 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
                 }).collect()
             };
 
-            Ok(record_ids.into_iter())
+            Ok(record_ids)
 
         } else {
 
             //No variant found, so return an empty Iterator
-            Ok(vec![].into_iter())
+            Ok(vec![])
         }
     }
 
@@ -828,7 +842,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         Self::unicode_truncate(key, MEANINGFUL_KEY_LEN)
     }
 
-    // Returns all of the variants of a key that we will put into the variants database
+    /// Returns all of the variants of a key that we will put into the variants database
     fn variants(key: &[u8], existing_variants : Option<HashSet<Vec<u8>>>) -> HashSet<Vec<u8>> {
 
         let mut variants_set : HashSet<Vec<u8>> = match existing_variants {
@@ -990,7 +1004,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     }
 
     #[cfg(feature = "perf_counters")]
-    pub fn reset_perf_counters(&mut self) {
+    pub fn reset_perf_counters(&self) {
         self.perf_counters.set(PerfCounters::new());
     }
 }
@@ -1104,7 +1118,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn lookup_exact<'a>(&'a self, key : &'a str) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
-        self.lookup_exact_internal(key.as_bytes())
+        self.lookup_exact_internal(key.as_bytes()).map(|result_vec| result_vec.into_iter())
     }
 
     /// Locates all records in the table with a key that is within a deletion distance of MAX_DELETES of
@@ -1137,7 +1151,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_best<D : 'static + Copy + Zero + PartialOrd, F : Fn(&[u8], &[u8])->D>(&self, key : &str, distance_function : F) -> Result<RecordID, String> {
+    pub fn lookup_best<'a, D : 'static + Copy + Zero + PartialOrd, F : 'a + Fn(&[u8], &[u8])->D>(&'a self, key : &'a str, distance_function : F) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
         self.lookup_best_internal(key.as_bytes(), distance_function)
     }
 }
@@ -1248,7 +1262,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn lookup_exact<'a>(&'a self, key : &'a [u8]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
-        self.lookup_exact_internal(key)
+        self.lookup_exact_internal(key).map(|result_vec| result_vec.into_iter())
     }
 
     /// Locates all records in the table with a key that is within a deletion distance of MAX_DELETES of
@@ -1281,7 +1295,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_best<D : 'static + Copy + Zero + PartialOrd, F : Fn(&[u8], &[u8])->D>(&self, key : &[u8], distance_function : F) -> Result<RecordID, String> {
+    pub fn lookup_best<'a, D : 'static + Copy + Zero + PartialOrd, F : 'a + Fn(&[u8], &[u8])->D>(&'a self, key : &'a [u8], distance_function : F) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
         self.lookup_best_internal(key, distance_function)
     }
 }
@@ -1607,12 +1621,13 @@ mod tests {
         assert_eq!(results.len(), 0);
 
         //Test lookup_best, using the supplied edit_distance function
-        let result = table.lookup_best("Bonday", table.default_distance_func()).unwrap();
-        assert_eq!(result, mon);
+        let results : Vec<RecordID> = table.lookup_best("Bonday", table.default_distance_func()).unwrap().collect();
+        assert_eq!(results.len(), 1);
+        assert!(results.contains(&mon));
 
         //Test lookup_best, when there is no acceptable match
-        let result = table.lookup_best("Rahu", table.default_distance_func());
-        assert!(result.is_err());
+        let results : Vec<RecordID> = table.lookup_best("Rahu", table.default_distance_func()).unwrap().collect();
+        assert_eq!(results.len(), 0);
 
         //Test lookup_fuzzy with a perfect match, using the supplied edit_distance function
         //In this case, we should only get one match within edit-distance 2
@@ -1652,8 +1667,9 @@ mod tests {
 
         //Since "Tuesday" had one variant overlap with "Thursday", i.e. "Tusday", make sure we now find
         // "Thursday" when we attempt to lookup "Tuesday"
-        let result = table.lookup_best("Tuesday", table.default_distance_func()).unwrap();
-        assert_eq!(result, thu);
+        let results : Vec<RecordID> = table.lookup_best("Tuesday", table.default_distance_func()).unwrap().collect();
+        assert_eq!(results.len(), 1);
+        assert!(results.contains(&thu));
 
         //Delete "Saturday" and make sure we see no matches when we try to search for it
         table.delete(sat).unwrap();
@@ -1781,8 +1797,9 @@ mod tests {
         let _three = table.insert(b"San", &3.0).unwrap();
         let pi = table.insert(b"Pi", &3.1415926535).unwrap();
 
-        let result = table.lookup_best(b"P", table.default_distance_func()).unwrap();
-        assert_eq!(result, pi);
+        let results : Vec<RecordID> = table.lookup_best(b"P", table.default_distance_func()).unwrap().collect();
+        assert_eq!(results.len(), 1);
+        assert!(results.contains(&pi));
         
         let results : Vec<RecordID> = table.lookup_fuzzy_raw(b"ne").unwrap().collect();
         assert_eq!(results.len(), 1);
@@ -1794,7 +1811,7 @@ mod tests {
     fn perf_counters_test() {
 
         //Initialize the table with a very big database
-        let mut table = Table::<i32, 2, 12, true>::new("all_cities.geonames.rocks").unwrap();
+        let table = Table::<i32, 2, 12, true>::new("all_cities.geonames.rocks").unwrap();
 
         //Make sure we have no pathological case of a variant for a zero-length string
         let iter = table.lookup_fuzzy_raw("").unwrap();
@@ -1822,19 +1839,8 @@ mod tests {
 }
 
 
-//QUESTION: Could we sort the variants by the number of removes, with the idea being that we'd
-// check the closer matches first, and possibly avoid the need for checking the other matches?
-//ANSWER: No.  Sadly that doesn't buy us anything because we can't guarentee the distance function
-// correlates to the number of removes.  But we can guarentee that precisely the same pattern will
-// have distance zero to itself.  So basically exact matches are a special case, but otherwise we
-// need to try all variants.
 
-//GOATGOATGOAT, Fast path to return from lookup_best as soon as we get to a distance of zero... Perhaps a better
-// implementation is to check for exactly the query string before iterating the variants.
-//
-//GOATGOATGOAT.  lookup_best should also return an iterator, it just should only iterate over the values that
-// are equal to the best value
-//
+
 //
 //GOATGOATGOAT, If we have a hot spot on the distance function.
 // we can reduce the number of times it's called by first computing the keys that overlap with the
