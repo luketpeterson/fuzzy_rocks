@@ -541,32 +541,47 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         //Compute the variants for the key
         let key_variants = Self::variants(key.borrow());
 
-        //Count the number of overlapping variants the key has with each existing group
-        // NOTE: It's possible the variant_reverse_lookup_map doesn't capture all of the
-        // different groups containing a given variant.  This could happen if we chose not
-        // to merge variants for any reason, like exceeding a max number of keys in a key group,
-        // It could also happen if a variant set ends up overlapping two previously disjoint
-        // variant sets.  The only way to avoid that would be to merge the two existing key
-        // groups into a single key group, but we don't have logic to merge existing key groups,
-        // only to append new keys and the key's variants to a group.
-        // Since the whole key groups logic is just an optimization, this edge case will not
-        // affect the correctness of the results.
-        let mut overlap_counts : Vec<usize> = vec![0; groups.key_group_keys.len()];
-        for variant in key_variants.iter() {
-            //See if it's already part of another key's variant list
-            if let Some(existing_group) = groups.variant_reverse_lookup_map.get(&variant[..]) {
-                overlap_counts[*existing_group] += 1;
+        //Variables that determine which group we merge into, or whether we create a new key group
+        let mut group_idx; //The index of the key group we'll merge this key into
+        let create_new_group;
+
+        //If we already have exactly this key as a variant, then we will add the key to that
+        // key group
+        if let Some(existing_group) = groups.variant_reverse_lookup_map.get(key.borrow()) {
+            group_idx = *existing_group;
+            create_new_group = false;
+        } else {
+            //Count the number of overlapping variants the key has with each existing group
+            // NOTE: It's possible the variant_reverse_lookup_map doesn't capture all of the
+            // different groups containing a given variant.  This could happen if we chose not
+            // to merge variants for any reason, like exceeding a max number of keys in a key group,
+            // It could also happen if a variant set ends up overlapping two previously disjoint
+            // variant sets.  The only way to avoid that would be to merge the two existing key
+            // groups into a single key group, but we don't have logic to merge existing key groups,
+            // only to append new keys and the key's variants to a group.
+            // Since the whole key groups logic is just an optimization, this edge case will not
+            // affect the correctness of the results.
+            let mut overlap_counts : Vec<usize> = vec![0; groups.key_group_keys.len()];
+            for variant in key_variants.iter() {
+                //See if it's already part of another key's variant list
+                if let Some(existing_group) = groups.variant_reverse_lookup_map.get(&variant[..]) {
+                    overlap_counts[*existing_group] += 1;
+                }
             }
+
+            let (max_group_idx, max_overlaps) = overlap_counts.into_iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(Ordering::Equal))
+            .unwrap_or((0, 0));
+            group_idx = max_group_idx;
+            create_new_group = max_overlaps < 5;// GOATGOAT //NOTE: Just some arbitrary threshold arrived
+                // at empirically.  Unless we have at least 5 variant overlaps we'll make a new key group.
         }
 
         //Make a decision about whether to:
         //A.) Use the key as the start of a new key group, or
         //B.) Combine the key and its variant into an existing group
-        let (mut group_idx, max_val) = overlap_counts.into_iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(Ordering::Equal))
-            .unwrap_or((0, 0));
-        if max_val == 0 {
+        if create_new_group {
             //A. We have no overlap with any existing group, so we will create a new group for this key
             group_idx = groups.key_group_keys.len();
             let mut new_set = HashSet::with_capacity(1);
@@ -2114,7 +2129,7 @@ mod tests {
         // NOTE: Uncomment this to use a different file
         // let geonames_file_path = PathBuf::from("/path/to/file/cities500.txt");
 //GOATGOATGOAT
-// let geonames_file_path = PathBuf::from("/Users/admin/Downloads/Geonames.org/cities500.txt");
+//let geonames_file_path = PathBuf::from("/Users/admin/Downloads/Geonames.org/cities500.txt");
 
     
         //Create the FuzzyRocks Table, and clear out any records that happen to be hanging out

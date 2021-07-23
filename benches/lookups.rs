@@ -40,17 +40,6 @@ pub fn london_lookup_benchmark(c: &mut Criterion) {
     c.bench_function("lookup_best_inexact_london", |b| b.iter(|| black_box( {
         let _iter = table.lookup_best("Rondon", table.default_distance_func()).unwrap();
     })));
-
-    //Perform a fuzzy lookup, but stop after we get the first result 
-    c.bench_function("lookup_fuzzy_one_london", |b| b.iter(|| black_box( {
-        let mut iter = table.lookup_fuzzy("london", table.default_distance_func(), 3).unwrap();
-        let _ = iter.next().unwrap();
-    })));
-
-    c.bench_function("lookup_fuzzy_one_tokyo", |b| b.iter(|| black_box( {
-        let mut iter = table.lookup_fuzzy("tokyo", table.default_distance_func(), 3).unwrap();
-        let _ = iter.next().unwrap();
-    })));
     
     //Perform the same fuzzy lookup, but iterate over all of the results
     c.bench_function("lookup_fuzzy_all_london", |b| b.iter(|| black_box( {
