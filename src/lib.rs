@@ -308,6 +308,14 @@ impl KeyGroups {
     }
 }
 
+/// The number of variants a key must share with an existing key group in order for that key to
+/// be added to the group rather than forming a separate key group.
+/// 
+/// NOTE: We arrived at the value (5) empirically by testing a number of different values and
+/// observing the effects on lookup speed, DB construction speed, and DB size.  The observed data
+/// points are checked in, in the file: misc/perf_data.txt
+const VARIANT_OVERLAP_GROUP_THRESHOLD : usize = 5;
+
 const KEYS_CF_NAME : &str = "keys";
 const RECORD_DATA_CF_NAME : &str = "rec_data";
 const VALUES_CF_NAME : &str = "values";
@@ -551,31 +559,38 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
             group_idx = *existing_group;
             create_new_group = false;
         } else {
-            //Count the number of overlapping variants the key has with each existing group
-            // NOTE: It's possible the variant_reverse_lookup_map doesn't capture all of the
-            // different groups containing a given variant.  This could happen if we chose not
-            // to merge variants for any reason, like exceeding a max number of keys in a key group,
-            // It could also happen if a variant set ends up overlapping two previously disjoint
-            // variant sets.  The only way to avoid that would be to merge the two existing key
-            // groups into a single key group, but we don't have logic to merge existing key groups,
-            // only to append new keys and the key's variants to a group.
-            // Since the whole key groups logic is just an optimization, this edge case will not
-            // affect the correctness of the results.
-            let mut overlap_counts : Vec<usize> = vec![0; groups.key_group_keys.len()];
-            for variant in key_variants.iter() {
-                //See if it's already part of another key's variant list
-                if let Some(existing_group) = groups.variant_reverse_lookup_map.get(&variant[..]) {
-                    overlap_counts[*existing_group] += 1;
-                }
-            }
 
-            let (max_group_idx, max_overlaps) = overlap_counts.into_iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(Ordering::Equal))
-            .unwrap_or((0, 0));
-            group_idx = max_group_idx;
-            create_new_group = max_overlaps < 5;// GOATGOAT //NOTE: Just some arbitrary threshold arrived
-                // at empirically.  Unless we have at least 5 variant overlaps we'll make a new key group.
+            if VARIANT_OVERLAP_GROUP_THRESHOLD > 0 {
+
+                //Count the number of overlapping variants the key has with each existing group
+                // NOTE: It's possible the variant_reverse_lookup_map doesn't capture all of the
+                // different groups containing a given variant.  This could happen if we chose not
+                // to merge variants for any reason, like exceeding a max number of keys in a key group,
+                // It could also happen if a variant set ends up overlapping two previously disjoint
+                // variant sets.  The only way to avoid that would be to merge the two existing key
+                // groups into a single key group, but we don't have logic to merge existing key groups,
+                // only to append new keys and the key's variants to a group.
+                // Since the whole key groups logic is just an optimization, this edge case will not
+                // affect the correctness of the results.
+                let mut overlap_counts : Vec<usize> = vec![0; groups.key_group_keys.len()];
+                for variant in key_variants.iter() {
+                    //See if it's already part of another key's variant list
+                    if let Some(existing_group) = groups.variant_reverse_lookup_map.get(&variant[..]) {
+                        overlap_counts[*existing_group] += 1;
+                    }
+                }
+
+                let (max_group_idx, max_overlaps) = overlap_counts.into_iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(Ordering::Equal))
+                .unwrap_or((0, 0));
+                group_idx = max_group_idx;
+                create_new_group = max_overlaps < VARIANT_OVERLAP_GROUP_THRESHOLD; //Unless we have at least VARIANT_OVERLAP_GROUP_THRESHOLD variant overlaps we'll make a new key group.
+
+            } else {
+                group_idx = 0;
+                create_new_group = groups.key_group_keys.len() == 0;
+            }
         }
 
         //Make a decision about whether to:
@@ -1532,6 +1547,13 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         }
     }
 
+//GOATGOATGOAT, Make a Char type associated with the table, that is a char if the UNICODE_KEYS is true and a u8 if its false
+// Then get rid of calls to unicode_char_at_index, and replace them with indexing into a buffer of those...
+// For starters, we'll just do this inside edit_distance()
+
+//GOATGOATGOAT, Write up next steps, to use a char type plumbed throughout, so the symspell algorithm can operate on
+// atoms that aren't u8.
+
     // Removes a single unicode character at the specified index from a utf-8 string stored in a slice of bytes
     // The "UNICODE_KEYS" path relies on the buffer being valid unicode
     fn unicode_remove(s: &[u8], index: usize) -> Vec<u8> {
@@ -1583,15 +1605,24 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// This implementation uses the Wagner-Fischer Algorithm, as it's described [here](https://en.wikipedia.org/wiki/Levenshtein_distance)
     pub fn edit_distance(key_a : &[u8], key_b : &[u8]) -> u64 {
 
+//GOATGOATGOAT Early return from this function doubles performance... So half our time is in here even
+// though the flamegraph isn't showing that for some reason.
+// return 2;
+
 // //GOATGOAT
 // println!("{} vs {}", String::from_utf8(key_a.to_vec()).unwrap(), String::from_utf8(key_b.to_vec()).unwrap());
+
+//GOATGOAT Optimization Opportunities:
+//1. Can I avoid zeroing the statically-allocated buffer d? (5% speedup)
+//2. pre-load keys into chars buffer to save call to unicode_char_at_index in loop (10% speedup)
 
         let m = Self::unicode_len(key_a)+1;
         let n = Self::unicode_len(key_b)+1;
 
         //Allocate a 2-dimensional vec for the distances between the first i characters of key_a
         //and the first j characters of key_b
-        let mut d = vec![vec![0; n]; m];
+        //let mut d = vec![vec![0; n]; m];
+        let mut d = [[0; 50]; 50]; //GOATGOATGOAT, Make sure no keys exceed this length
 
         //NOTE: I personally find this (below) more readable, but clippy really like the other style.  -\_(..)_/-
         // for i in 1..m {

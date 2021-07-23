@@ -58,7 +58,7 @@ criterion_group!(benches, london_lookup_benchmark);
 criterion_main!(benches);
 
 //NOTE: invoke flamegraph in criterion with:
-// sudo cargo flamegraph --bench lookups -- --bench lookup_best_tokyo
+// sudo cargo flamegraph --bench lookups -- --bench lookup_fuzzy_all_london
 
 //Solved Mysteries:
 //
