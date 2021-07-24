@@ -7,7 +7,7 @@
 //! The reasons to use this crate over another SymSpell implementation are:
 //! - You want to use a custom distance function
 //! - Startup time matters more than lookups-per-second
-//! - You care about resident memory footprint
+//! - You have millions of keys and care about resident memory footprint
 //! 
 //! ## Records
 //! 
@@ -159,6 +159,7 @@ use bincode::Options;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::iter::FromIterator;
+use std::mem::{MaybeUninit};
 
 use rocksdb::{DB, DBWithThreadMode, ColumnFamily, ColumnFamilyDescriptor, MergeOperands};
 
@@ -316,6 +317,9 @@ impl KeyGroups {
 /// observing the effects on lookup speed, DB construction speed, and DB size.  The observed data
 /// points are checked in, in the file: misc/perf_data.txt
 const VARIANT_OVERLAP_GROUP_THRESHOLD : usize = 5;
+
+/// The maximum number of characters allowable in a key.  Longer keys will cause an error
+pub const MAX_KEY_LENGTH : usize = 95;
 
 const KEYS_CF_NAME : &str = "keys";
 const RECORD_DATA_CF_NAME : &str = "rec_data";
@@ -529,6 +533,11 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// group or to create a new group for a key
     fn add_key_to_groups<K : Borrow<[u8]> + Eq + Hash + Serialize>(key : K, groups : &mut KeyGroups, update_reverse_map : bool) -> Result<(), String> {
         
+        //Make sure the key is within the maximum allowable MAX_KEY_LENGTH
+        if key.borrow().len() > MAX_KEY_LENGTH {
+            return Err("key length exceeds MAX_KEY_LENGTH".to_string());
+        }
+
         //Compute the variants for the key
         let key_variants = Self::variants(key.borrow());
 
@@ -808,19 +817,20 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     }
 
     /// Replaces all of the keys in a record with the supplied keys
-    ///
-    /// NOTE: This function will NOT update any variants used to locate the key
-    fn replace_keys_internal<K : Borrow<[u8]> + Eq + Hash + Serialize, KeysIterT : Iterator<Item=K>>(&mut self, record_id : RecordID, keys_iter : KeysIterT, num_keys : usize) -> Result<(), String> {
+    fn replace_keys_internal<K : Borrow<[u8]>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
 
-        if num_keys < 1 {
+        if keys.len() < 1 {
             return Err("record must have at least one key".to_string());
+        }
+        if keys.iter().any(|key| key.borrow().len() > MAX_KEY_LENGTH) {
+            return Err("key length exceeds MAX_KEY_LENGTH".to_string());
         }
 
         //Delete the old keys
         self.delete_keys_internal(record_id)?;
 
         //Set the keys on the new record
-        self.put_record_keys(record_id, keys_iter, num_keys)
+        self.put_record_keys(record_id, keys.into_iter().map(|key| key.borrow()), keys.len())
     }
 
     /// Deletes a record's value in the values table
@@ -903,6 +913,10 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// QUESTION: should the visitor closure be able to return a bool, to mean "stop" or "keep going"?
     fn visit_fuzzy_candidates<F : FnMut(KeyGroupID)>(&self, raw_key : &[u8], mut visitor : F) -> Result<(), String> {
+
+        if raw_key.len() > MAX_KEY_LENGTH {
+            return Err("key length exceeds MAX_KEY_LENGTH".to_string());
+        }
 
         //Create all of the potential variants based off of the "meaningful" part of the key
         let variants = Self::variants(raw_key);
@@ -1047,6 +1061,10 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// This function will be more efficient than a fuzzy lookup.
     fn lookup_exact_internal(&self, raw_key : &[u8]) -> Result<Vec<RecordID>, String> {
+
+        if raw_key.len() > MAX_KEY_LENGTH {
+            return Err("key length exceeds MAX_KEY_LENGTH".to_string());
+        }
 
         let meaningful_key = Self::meaningful_key_substring(raw_key);
         let meaningful_noop = meaningful_key.len() == raw_key.len();
@@ -1387,23 +1405,33 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
 
         //Allocate a 2-dimensional vec for the distances between the first i characters of key_a
         //and the first j characters of key_b
-        //let mut d = vec![vec![0; n]; m];
-        let mut d = [[0; 50]; 50]; //GOATGOATGOAT, Make sure no keys exceed this length
+        let mut d : [[u8; MAX_KEY_LENGTH + 1]; MAX_KEY_LENGTH + 1] = unsafe { MaybeUninit::uninit().assume_init() };
 
         //NOTE: I personally find this (below) more readable, but clippy really like the other style.  -\_(..)_/-
         // for i in 1..m {
         //     d[i][0] = i;
         // }
         for (i, row) in d.iter_mut().enumerate().skip(1) {
-            row[0] = i;
+            //row[0] = i as u8;
+            let element = unsafe{ row.get_unchecked_mut(0) };
+            *element = i as u8;
         }
 
-        for j in 1..n {
-            d[0][j] = j;
+        //for j in 1..n {
+            //d[0][j] = j as u8;
+        //}
+        for (j, element) in d[0].iter_mut().enumerate() {
+            *element = j as u8;
         }
 
         for j in 1..n {
             for i in 1..m {
+
+                //TODO: There is one potential optimization left.  There is no reason to allcate a whole
+                // square buffer of MAX_KEY_LENGTH on a side, because we never look back before the previous
+                // line in the buffer.  A more cache-friendly approach might be to allocate a
+                // MAX_KEY_LENGTH x 2 buffer, and then alternate between writing the values in one line
+                // and reading them from the previous line.
 
                 let substitution_cost = if Self::unicode_char_at_index(key_a, i-1) == Self::unicode_char_at_index(key_b, j-1) {
                     0
@@ -1411,13 +1439,18 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
                     1
                 };
 
-                let deletion_distance = d[i-1][j] + 1;
-                let insertion_distance = d[i][j-1] + 1;
-                let substitution_distance = d[i-1][j-1] + substitution_cost;
+                //let deletion_distance = d[i-1][j] + 1;
+                let deletion_distance = unsafe {d.get_unchecked(i-1).get_unchecked(j)} + 1;
+                //let insertion_distance = d[i][j-1] + 1;
+                let insertion_distance = unsafe {d.get_unchecked(i).get_unchecked(j-1)} + 1;
+                //let substitution_distance = d[i-1][j-1] + substitution_cost;
+                let substitution_distance = unsafe {d.get_unchecked(i-1).get_unchecked(j-1)} + substitution_cost;
 
                 let smallest_distance = min(min(deletion_distance, insertion_distance), substitution_distance);
                 
-                d[i][j] = smallest_distance;  
+                //d[i][j] = smallest_distance;  
+                let element = unsafe{ d.get_unchecked_mut(i).get_unchecked_mut(j) };
+                *element = smallest_distance;
             }
         }
 
@@ -1508,7 +1541,8 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn replace_keys<K : Borrow<str>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
-        self.replace_keys_internal(record_id, keys.into_iter().map(|key| key.borrow().as_bytes()), keys.len())
+        let keys_vec : Vec<&[u8]> = keys.into_iter().map(|key| key.borrow().as_bytes()).collect();
+        self.replace_keys_internal(record_id, &keys_vec[..])
     }
 
     /// Returns an iterator over all of the key associated with the specified record
@@ -1659,7 +1693,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn replace_keys<K : Borrow<[u8]>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
-        self.replace_keys_internal(record_id, keys.into_iter().map(|key| key.borrow()), keys.len())
+        self.replace_keys_internal(record_id, keys)
     }
 
     /// Returns an iterator over all of the key associated with the specified record
@@ -1975,6 +2009,15 @@ mod tests {
             .double_quote(false)
             .from_reader(tsv_file_contents.as_bytes());
 
+        //A function we'll use to shorten names that exceed a limited number of characters
+        fn utf8_truncate(s : &str, len : usize) -> String {
+            s.chars()
+                .enumerate()
+                .filter(|(i, _)| *i < len)
+                .map(|(_, the_char)| the_char)
+                .collect()
+        }
+
         //Iterate over every geoname entry in the geonames file and insert it (lowercase) into our table
         let mut record_id = RecordID::NULL;
         let mut tsv_record_count = 0;
@@ -1987,7 +2030,9 @@ mod tests {
             names.insert(geoname.name.to_lowercase());
 
             //Create a record in the table
-            let names_vec : Vec<String> = names.into_iter().collect();
+            let names_vec : Vec<String> = names.into_iter()
+                .map(|string| utf8_truncate(string.as_str(), MAX_KEY_LENGTH))
+                .collect();
             record_id = table.create(&names_vec[..], &geoname.geonameid).unwrap();
             tsv_record_count += 1;
 
@@ -2284,6 +2329,7 @@ mod tests {
 // Multi-key support
 // lookup_best now returns an iterator instead of one arbitrarily-chosen record
 // ???(not yet) Support for a generic character type in key
+// Adding micro-benchmarks using criterion
 // Massive Perf optimizations for lookups
 //  lookup_best checks lookup_exact first before more expensive lookup_fuzzy
 //  key groups mingle similar keys for a record
