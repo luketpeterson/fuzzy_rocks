@@ -84,7 +84,9 @@
 //! conceptually "too far away".  Once the distance function has been evaluated, its return value is
 //! considered the authoritative distance and the delete distance is irrelevant.
 //! 
-//! ## Unicode Support
+//! ## Unicode and UTF-8 Support
+//! 
+//! GOATGOAT, More to say
 //! 
 //! A [Table] may allow for unicode keys or not, depending on the value of the `UNICODE_KEYS` constant used
 //! when the Table was created.
@@ -117,8 +119,9 @@
 //! The performance will also vary greatly depending on the key distribution and the table parameters.  Keys
 //! that are distinct from eachother will lead to faster searches vs. keys that share many variants in common.
 //! 
-//! GOATGOATGOAT, DO a write-up on when to use multiple keys vs. when to use multiple records.  Big data = multiple keys
-//! Similar keys (variants of the same spelling) = multiple keys.  disjoint keys and small "value" type might be better off with multiple records.
+//! GOATGOAT, explain multi-key support
+//! 
+//! ### Tuning for Performance
 //! 
 //! GOATGOATGOAT, Write-up on perf_counters, how to enable, etc.
 //! 
@@ -278,8 +281,6 @@ impl RecordData {
 
 /// A transient struct to keep track of the multiple key groups, reflecting what's in the DB.
 /// Used when assembling key groups or adding new keys to existing groups
- 
-//GOATGOAT, Should I rewrite this as a vec of structs rather than struct of vecs??
 #[derive(Clone)]
 struct KeyGroups {
     variant_reverse_lookup_map : HashMap<Vec<u8>, usize>,
@@ -496,15 +497,6 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         Ok(())
     }
 
-    //GOATGOATGOAT, Dead Code
-    // /// Adds the RecordID to each variant of all supplied keys
-    // fn put_key_variants_internal<K : Borrow<[u8]> + Eq + Hash + Serialize>(&mut self, record_id : RecordID, raw_keys : &[K]) -> Result<Vec<HashSet<K>>, String>
-    // {
-            //GOATGOATGOAT, NEED BADLY TO ACTUALLY PUT the key groups into the DB once they're created
-
-    //     self.put_variants_internal(record_id, variants)
-    // }
-
     /// Divides the keys up into key groups and assigns them to a record.
     /// 
     /// Should NEVER be called on a record that already has keys or orphaned database entries will result
@@ -513,15 +505,6 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         //Make groups for the keys
         let groups = Self::make_groups_from_keys(keys_iter, num_keys).unwrap();
         let num_groups = groups.key_group_keys.len();
-
-//GOATGOATGOAT
-// println!("NumGroups {}", num_groups);
-// for i in 0..num_groups {
-//     println!("\tGroupID {}", groups.group_ids[i]);
-//     for key in groups.key_group_keys[i].iter() {
-//         println!("\t\tKey {:?}", String::from_utf8(key.clone()).unwrap());
-//     }   
-// }
 
         //Put the variants for each group into the right table
         for (idx, variant_set) in groups.key_group_variants.into_iter().enumerate() {
@@ -628,12 +611,6 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// likely to belong in the same group and keys with fewer or none are less likely.
     fn make_groups_from_keys<K : Borrow<[u8]> + Eq + Hash + Serialize, KeysIterT : Iterator<Item=K>>(keys_iter : KeysIterT, num_keys : usize) -> Result<KeyGroups, String> {
 
-//GOATGOATGOAT The strategy will be:
-//1.) A simple variants function that just returns the HashSet for one key
-//2.) Call it, and then consult the reverse lookup map to see if there is any overlap with any groups
-//3.) If there is no overlap, create a new group and add all of the variants to the reverse lookup map
-//4.) Otherwise choose the best group to merge with, and update the reverse lookup appropriately
-
         //Start with empty key groups, and add the keys one at a time
         let mut groups = KeyGroups::new();
         for (key_idx, raw_key) in keys_iter.enumerate() {
@@ -701,17 +678,6 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// Add additional keys to a record, including creation of all associated variants
     fn add_keys_internal<K : Borrow<[u8]> + Eq + Hash + Serialize, KeysIterT : Iterator<Item=K>>(&mut self, record_id : RecordID, keys_iter : KeysIterT, num_keys : usize) -> Result<(), String> {
 
-//GOATGOATGOAT
-//1. raw_keys (input param) ought to be an iterator
-//2. need to be able to find the best group for a key, given a set of existing groups
-//  a. meaning I need to load the existing groups for the record
-//  b. maybe I should refactor parts of make_groups_from_keys...
-//  IDEA! - rewrite make_groups_from_keys in terms of sequentially called "add_key_to_groups"
-//      which is what the function's implementation already does anyway.
-//  Do I want a "key_groups" struct???  Might be overkill, but might make the code more clear
-//
-
-
         //Get the record's existing key groups and variants, so we can figure out the
         //best places for each additional new key
         let mut groups = self.load_key_groups(record_id)?;
@@ -754,38 +720,6 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
 
         //Put the new rec_data entry, to reflect all the associated key groups
         self.put_key_groups(record_id, &groups.group_ids[..])
-
-//GOATGOAT Below is old dead implementation
-
-        // //Compute all variants for the keys we're going to add
-        // let mut all_keys = HashSet::new();
-        // let mut new_keys_variants = HashSet::new();
-        // for raw_key in raw_keys {
-        //     new_keys_variants = Self::variants(raw_key.borrow(), Some(new_keys_variants));
-        //     all_keys.insert(raw_key.borrow());
-        // }
-
-        // //Get the record's existing keys and Compute all existing variants based on those
-        // let mut existing_keys_variants = HashSet::new();
-        // let existing_keys : Vec<Vec<u8>> = self.get_keys_internal(record_id)?.map(|key_box| key_box.to_vec()).collect();
-        // for existing_key in existing_keys.iter() {
-        //     existing_keys_variants = Self::variants(existing_key, Some(existing_keys_variants));
-        //     all_keys.insert(existing_key);
-        // }
-
-        // //Get the set of variants that is unique to the keys we'll be adding
-        // let mut unique_keys_variants = HashSet::new();
-        // for unique_keys_variant in new_keys_variants.difference(&existing_keys_variants) {
-        //     unique_keys_variants.insert(unique_keys_variant.to_owned());
-        // }
-
-        // //Add the new record_id to the appropriate entries for each of the new variants
-        // self.put_variants_internal(record_id, unique_keys_variants)?;
-
-        // //Add the new keys to the record's entry in the keys table by replacing the keys vector
-        // // with the superset
-        // self.put_keys_internal(record_id, &all_keys)
-        // //GOAT, now this is called put_key_group_internal, but only puts one group at a time
     }
 
     /// Removes the specified keys from the keys associated with a record
@@ -871,50 +805,6 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
 
         //Update the record's rec_data entry to reflect the new groups after deletion
         self.put_key_groups(record_id, &remaining_group_indices[..])
-
-
-
-//GOATGOAT Below is old dead implementation
-
-        // //Get the record's existing keys, and exclude any that are part of the remove set
-        // let mut remaining_keys = HashSet::new();
-        // for existing_key in self.get_keys_internal(record_id)? {
-        //     if !remove_keys.contains(&*existing_key) {
-        //         remaining_keys.insert(existing_key);
-        //     }
-        // }
-        
-        // //If we're left with no remaining keys, we should throw an error because all records must
-        // //have at least one key
-        // if remaining_keys.len() < 1 {
-        //     return Err("cannot remove all keys from record".to_string());
-        // }
-
-        // //Compute all variants for the keys we're removing
-        // let mut remove_keys_variants = HashSet::new();
-        // for remove_key in remove_keys {
-        //     remove_keys_variants = Self::variants(remove_key.borrow(), Some(remove_keys_variants));
-        // }
-
-        // //Compute all the variants for the keys that must remain
-        // let mut remaining_keys_variants = HashSet::new();
-        // for remaining_key in remaining_keys.iter() {
-        //     remaining_keys_variants = Self::variants(&*remaining_key, Some(remaining_keys_variants));
-        // }
-
-        // //Exclude all of the overlapping variants, leaving only the variants that are unique
-        // //to the keys we're removing
-        // let mut unique_keys_variants = HashSet::new();
-        // for unique_keys_variant in remove_keys_variants.difference(&remaining_keys_variants) {
-        //     unique_keys_variants.insert(unique_keys_variant.to_owned());
-        // }
-
-        // //Delete our RecordID from each variant's list, and remove the list if we made it empty
-        // self.delete_variants_internal(record_id, unique_keys_variants)?;
-
-        // //Update our record's keys in the keys table
-        // self.put_keys_internal(record_id, &remaining_keys)
-        // //GOAT, need to work this on a key-group by group basis
     }
 
     /// Replaces all of the keys in a record with the supplied keys
@@ -931,10 +821,6 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
 
         //Set the keys on the new record
         self.put_record_keys(record_id, keys_iter, num_keys)
-
-        //GOATGOAT.  Dead Implementation
-        // self.put_key_variants_internal(record_id, raw_keys)?;
-        // self.put_keys_internal(record_id, raw_keys)
     }
 
     /// Deletes a record's value in the values table
@@ -1048,53 +934,6 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         Ok(())
     }
 
-    //GOATGOATGOAT, Dead old implementation
-    // /// Returns a set of all possible candidate key groups for a given fuzzy search key, based on
-    // /// MAX_DELETES, without any distance function applied
-    // /// 
-    // /// The `return_record_ids` parameter specifies whether the returned iterator will provide
-    // /// RecordIDs or KeyGroupIDs.  Yes this is a violation of type safety.  But it saves either
-    // /// making an identical copy of this function or having to copy the results in order to de-dup
-    // /// the RecordIDs
-    // fn fuzzy_candidates_iter(&self, raw_key : &[u8], return_record_ids : bool) -> Result<impl Iterator<Item=KeyGroupID>, String> {
-
-    //     //Create all of the potential variants based off of the "meaningful" part of the key
-    //     let variants = Self::variants(raw_key);
-
-    //     //Create a new HashSet to hold all of the RecordIDs that we find
-    //     let mut result_set = HashSet::new(); //TODO, may want to allocate this with a non-zero capacity
-
-    //     //Check to see if we have entries in the "variants" database for any of the key variants
-    //     let variants_cf_handle = self.db.cf_handle(VARIANTS_CF_NAME).unwrap();
-    //     for variant in variants {
-    //         // See if we have an entry in the variants database
-    //         if let Some(variant_vec_bytes) = self.db.get_pinned_cf(variants_cf_handle, variant)? {
-
-    //             #[cfg(feature = "perf_counters")]
-    //             {
-    //                 let num_key_group_ids = bincode_vec_fixint_len(&variant_vec_bytes);
-    //                 let mut perf_counters = self.perf_counters.get();
-    //                 perf_counters.variant_load_count += 1;
-    //                 if perf_counters.max_variant_entry_refs < num_key_group_ids {
-    //                     perf_counters.max_variant_entry_refs = num_key_group_ids;
-    //                 }
-    //                 self.perf_counters.set(perf_counters);
-    //             }
-        
-    //             // add all of the referenced KeyGroupID to our results
-    //             for key_group_id_bytes in bincode_vec_iter::<KeyGroupID>(&variant_vec_bytes) {
-    //                 if return_record_ids {
-    //                     result_set.insert(KeyGroupID(usize::from_le_bytes(key_group_id_bytes.try_into().unwrap())).record_id());
-    //                 } else {
-    //                     result_set.insert(KeyGroupID(usize::from_le_bytes(key_group_id_bytes.try_into().unwrap())));
-    //                 }
-    //             }
-    //         }
-    //     }
-
-    //     Ok(result_set.into_iter())
-    // }
-
     fn lookup_fuzzy_raw_internal(&self, raw_key : &[u8]) -> Result<impl Iterator<Item=RecordID>, String> {
 
         //Create a new HashSet to hold all of the RecordIDs that we find
@@ -1110,37 +949,17 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
 
         //Return an iterator through the HashSet we just made
         Ok(result_set.into_iter())
-
-    //GOATGOATGOAT, Old BORK implementation
-        // //We're only allowed to coerce a KeyGroupID into a RecordID because we passed `true` for return_record_ids
-        // self.fuzzy_candidates_iter(raw_key, true).map(|key_group_id| RecordID(key_group_id.0))
     }
 
-
-//GOATGOATGOAT FUUUUUUCK.  THis comment was made about the inside of lookup_fuzzy_internal...  Need to figure out how to dedup the returned IDs...
-//
-//Maybe what I need to do is to make the raw lookup be a two-level thingy... Like a HashMap of SmallVecs 
-// where the smallvecs contain the indices of the key groups, and the map key is the RecordID
-//
-//Then that would be returned by fuzzy_candidates_iter.  Better solution than de-duping, and having that
-// nasty return_record_ids flag.  The flag should instead be "skip_group_dedup"
-//
-//BETER IDEA
-//
-// I think two copies of this function are better.
-//
-//One returns an iterator, and goes straight to RecordIDs, for use in the raw lookups
-//The other returns KeyGroups...  wait... I can't figure out a good abstracted interface althought
-// there must be one The hashset function needs to be folded into the filtering function......
-//
-//
-//Okay------- Scratch all of that above.
-//
-// I think one function IS possible, it takes a closure that's an FnMut(key), which is called for every
-// possible key we encounter.  It's the closure's responsibility to maintain a HashSet or whatever.
-//
-
-
+    /// Returns an iterator over all RecordIDs and smallest distance values found with a fuzzy lookup
+    /// after evaluating the supplied  distance function for every found candidate key.
+    /// 
+    /// NOTE: This function evaluates the distance function for all keys in advance of returning the
+    /// iterator.  A lazy evaluation would be possible but would incur a sort of the KeyGroupIDs.
+    /// This would be needed to ensure that the smallest distance value for a given record was returned.
+    /// It would be necessary to evaluate every key group for a particular record before returning the
+    /// record.  The decision not to do this is on account of the fact that [lookup_fuzzy_raw_internal]
+    /// could be used instead if the caller wants a quick-to-return iterator.
     fn lookup_fuzzy_internal<D : 'static + Copy + Zero + PartialOrd, F : Fn(&[u8], &[u8])->D>(&self, raw_key : &[u8], distance_function : F, threshold : Option<D>) -> Result<impl Iterator<Item=(RecordID, D)>, String> {
 
         //Create a new HashMap to hold all of the RecordIDs that we might want to return, and the lowest
@@ -1159,8 +978,6 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
 
                 //Check the record's keys with the distance function and find the smallest distance
                 let mut record_keys_iter = self.get_keys_in_group(key_group_id).unwrap().into_iter();
-// //GOATGOATGOAT
-// println!("key_group_id {}", key_group_id);
                 let mut smallest_distance = distance_function(&record_keys_iter.next().unwrap()[..], raw_key); //If we have a zero-element keys array, it's a bug elsewhere
                 for record_key in record_keys_iter {
                     let distance = distance_function(&record_key, raw_key);
@@ -1193,40 +1010,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         Ok(result_map.into_iter())
     }
 
-    //GOATGOAT Old Bork implementation
-    // fn lookup_fuzzy_internal<'a, D : 'static + Copy + Zero + PartialOrd, F : 'a + Fn(&[u8], &[u8])->D>(&'a self, raw_key : &'a [u8], distance_function : F, threshold : Option<D>) -> Result<impl Iterator<Item=(RecordID, D)> + 'a, String> {
-    //     self.fuzzy_candidates_iter(raw_key).map(move |candidate_iter|
-    //         candidate_iter.filter_map(move |key_group_id| {
-
-    //             //QUESTION: Should we have an alternate fast path that only evaluates until we find
-    //             // any distance smaller than threshold?  It would mean we couldn't return a reliable
-    //             // distance but would save us evaluating distance for potentially many keys
-                
-    //             //Check the record's keys with the distance function and find the smallest distance
-    //             let mut record_keys_iter = self.get_keys_in_group(key_group_id).unwrap().into_iter();
-    //             let mut smallest_distance = distance_function(&record_keys_iter.next().unwrap()[..], raw_key); //If we have a zero-element keys array, it's a bug elsewhere
-    //             for record_key in record_keys_iter {
-    //                 let distance = distance_function(&record_key, raw_key);
-    //                 if distance < smallest_distance {
-    //                     smallest_distance = distance;
-    //                 }
-    //             }
-
-    //             match threshold {
-    //                 Some(threshold) => {
-    //                     if smallest_distance <= threshold{
-    //                         Some((record_id, smallest_distance))
-    //                     } else {
-    //                         None
-    //                     }        
-    //                 }
-    //                 None => Some((record_id, smallest_distance))
-    //             }
-    //         })
-    //     )
-    // }
-
-    fn lookup_best_internal<'a, D : 'static + Copy + Zero + PartialOrd, F : 'a + Fn(&[u8], &[u8])->D>(&'a self, raw_key : &'a [u8], distance_function : F) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
+    fn lookup_best_internal<D : 'static + Copy + Zero + PartialOrd, F : Fn(&[u8], &[u8])->D>(&self, raw_key : &[u8], distance_function : F) -> Result<impl Iterator<Item=RecordID>, String> {
 
         //First, we should check to see if lookup_exact gives us what we want.  Because if it does,
         // it's muuuuuuch faster.  If we have an exact result, no other key will be a better match
@@ -1383,21 +1167,6 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
 
         let key_groups_iter = self.get_key_groups(record_id)?;
         let result_iter = key_groups_iter.flat_map(move |key_group| self.get_keys_in_group(key_group).unwrap());
-
-
-//GOATGOAT Old implementation
-// //GOATGOATGOAT, Look at the "flatten" solution on the rust-user forum!!!
-
-//         let mut key_groups_iter = self.get_key_groups(record_id)?;
-
-//         //Init the result iterator with the first key group
-//         let first_group = key_groups_iter.next().unwrap(); //If we don't have at least one key group, we have corruption in the DB
-//         let mut result_iter : Box<dyn Iterator<Item=Vec<u8>>> = Box::new(self.get_keys_in_group(first_group)?);
-
-//         //Chain the iterators for the additional key groups
-//         for key_group in key_groups_iter {
-//             result_iter = Box::new(result_iter.chain(self.get_keys_in_group(key_group)?));
-//         }
 
         Ok(result_iter)
     }
@@ -1608,9 +1377,6 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
 //GOATGOATGOAT Early return from this function doubles performance... So half our time is in here even
 // though the flamegraph isn't showing that for some reason.
 // return 2;
-
-// //GOATGOAT
-// println!("{} vs {}", String::from_utf8(key_a.to_vec()).unwrap(), String::from_utf8(key_b.to_vec()).unwrap());
 
 //GOATGOAT Optimization Opportunities:
 //1. Can I avoid zeroing the statically-allocated buffer d? (5% speedup)
@@ -2222,15 +1988,8 @@ mod tests {
 
             //Create a record in the table
             let names_vec : Vec<String> = names.into_iter().collect();
-// //GOATGOATGOAT
-// println!("NAME--BEGIN -- {}", geoname.name);
-// // println!("{:?}", names_vec);
             record_id = table.create(&names_vec[..], &geoname.geonameid).unwrap();
             tsv_record_count += 1;
-
-// //GOATGOAT
-// println!("NAME--END");
-
 
             //Status Print
             if record_id.0 % 500 == 499 {
@@ -2377,6 +2136,7 @@ mod tests {
         //While we're here, Also test that the same key string occurring more than once
         // doesn't result in additional keys being added
         let sat = table.create(&["Saturday", "Saturday"], &"Douyoubi".to_string()).unwrap();
+        table.add_keys(sat, &["Saturday", "Saturday"]).unwrap();
         assert_eq!(table.keys_count(sat).unwrap(), 1);
 
         //Add some new keys to it, and verify that it can be found using any of its three keys
@@ -2502,13 +2262,11 @@ mod tests {
             assert!(table.perf_counters.get().keys_found_count > 0);
             assert!(table.perf_counters.get().max_variant_entry_refs > 0);
 
-            //GOATGOATGOAT
+            //Debug Prints
             println!("variant_load_count {}", table.perf_counters.get().variant_load_count);
             println!("key_group_lookup_count {}", table.perf_counters.get().key_group_lookup_count);
             println!("keys_found_count {}", table.perf_counters.get().keys_found_count);
             println!("max_variant_entry_refs {}", table.perf_counters.get().max_variant_entry_refs);
-
-
         }
         
         #[cfg(not(feature = "perf_counters"))]
@@ -2521,18 +2279,17 @@ mod tests {
 
 }
 
-
-
-
-//
-//GOATGOATGOAT, If we have a hot spot on the distance function.
-// we can reduce the number of times it's called by first computing the keys that overlap with the
-// variants in our query and testing only those keys.  I think the preflight test to check variant overlap
-// is essentially the same as the edit_distance function, except that we can early-out a lot of the loops
-// when they reach MAX_DELETES.
-//
-// And if we have only one key, we can skip that preflight step.
-//
+//GOATGOATGOAT
+//Features since last push to crates.io:
+// Multi-key support
+// lookup_best now returns an iterator instead of one arbitrarily-chosen record
+// ???(not yet) Support for a generic character type in key
+// Massive Perf optimizations for lookups
+//  lookup_best checks lookup_exact first before more expensive lookup_fuzzy
+//  key groups mingle similar keys for a record
+//  optimizations to Levenstein distance function for 3x speedup
+//  value table is separate from keys in DB
+// 
 
 //GOATGOATGOAT
 //Next, Add multi-key support
