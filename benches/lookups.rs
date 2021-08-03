@@ -83,13 +83,12 @@ criterion_main!(benches);
 // need to try all variants.  I added an optimization to call lookup_exact first inside the
 // implementation of lookup_best()
 //
+//* lookup_best_inexact_london benchmark is twice as fast as lookup_fuzzy_all_london, but 
+//  they're doing the same work.  Get to the bottom of why using counters.
+//ANSWER: They aren't doing the same work.  The key "london" hits twice as many variants and
+// consequently many more key groups than the key "Rondon".
 
 //Unsolved Mysteries: (with Robert Stack)
-
-// GOATGOATGOAT.  lookup_best_inexact_london benchmark is twice as fast as lookup_fuzzy_all_london, but 
-//  they're doing the same work.  Get to the bottom of why using counters.
 //
-// +counter to count the number of variants loaded
-//
+// Currently no unsolved mysteries!
 
-//GOATGOATGOAT.  It looks like one of the biggest things I can do for performance is to allocate the edit_distance buffer thingy on the stack

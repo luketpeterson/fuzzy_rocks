@@ -89,13 +89,13 @@
 //! 
 //! GOATGOAT, More to say
 //! 
-//! A [Table] may allow for unicode keys or not, depending on the value of the `UNICODE_KEYS` constant used
+//! A [Table] may allow for unicode keys or not, depending on the value of the `UTF8_KEYS` constant used
 //! when the Table was created.
 //! 
-//! If `UNICODE_KEYS` is `true`, keys may use unicode characters and multi-byte characters will still be
+//! If `UTF8_KEYS` is `true`, keys may use unicode characters and multi-byte characters will still be
 //! considered as single characters for the purpose of deleting characters to create key variants.
 //! 
-//! If `UNICODE_KEYS` is `false`, keys are just strings of [u8] characters.
+//! If `UTF8_KEYS` is `false`, keys are just strings of [u8] characters.
 //! This option has better performance.
 //! 
 //! ## Algorithm Details
@@ -200,12 +200,12 @@ use rocksdb::{DB, DBWithThreadMode, ColumnFamily, ColumnFamilyDescriptor, MergeO
 /// concatenating strings, this optimization will cause problems and you should either pass a high number
 /// to effectively disable it, or rework this code to use different logic to select the substring
 /// 
-/// -`UNICODE_KEYS` specifies whether the keys are UTF-8 encoded strings or not.  UFT-8 awareness is
+/// -`UTF8_KEYS` specifies whether the keys are UTF-8 encoded strings or not.  UFT-8 awareness is
 /// required to avoid deleting partial characters thus rendering the string invalid.  This comes at a
 /// performance cost, however, so passing `false` is more efficient if you plan to use regular ascii or
 /// any other kind of data as the table's keys.
 /// 
-pub struct Table<KeyCharT, ValueT, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize, const UNICODE_KEYS : bool> {
+pub struct Table<KeyCharT, ValueT, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize, const UTF8_KEYS : bool> {
     record_count : usize,
     db : DBWithThreadMode<rocksdb::SingleThreaded>,
     path : String,
@@ -664,7 +664,7 @@ impl KeyUnsafe<'_, char> for String {
 }
 
 /// The implementation of the shared parts of Table
-impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::DeserializeOwned, ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize, const UNICODE_KEYS : bool>Table<KeyCharT, ValueT, MAX_DELETES, MEANINGFUL_KEY_LEN, UNICODE_KEYS>
+impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::DeserializeOwned, ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize, const UTF8_KEYS : bool>Table<KeyCharT, ValueT, MAX_DELETES, MEANINGFUL_KEY_LEN, UTF8_KEYS>
     where Self : TableKeyEncoding<KeyCharT> {
 
     /// Creates a new Table, backed by the database at the path provided
@@ -1227,7 +1227,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     }
 
     /// Inserts a record into the Table, called by insert(), which is implemented differently depending
-    /// on the UNICODE_KEYS constant
+    /// on the UTF8_KEYS constant
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
@@ -1633,7 +1633,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
 
     // Returns the "meaningful" part of a key, that is used as the starting point to generate the variants
     fn meaningful_key_substring<'a, K : Key<'a, KeyCharT>>(key: &K) -> <Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT {
-        if UNICODE_KEYS {
+        if UTF8_KEYS {
             let result_string = unicode_truncate(key.borrow_key_str().unwrap(), MEANINGFUL_KEY_LEN);
             Self::owned_key_from_string(result_string)
         } else {
@@ -1650,7 +1650,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     // Returns a new owned key, that is a variant of the supplied key, without the character at the
     // specified index
     fn remove_char_from_key<'a, K : Key<'a, KeyCharT>>(key: &K, idx : usize) -> <Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT {
-        if UNICODE_KEYS {
+        if UTF8_KEYS {
             let result_string = unicode_remove_char(key.borrow_key_str().unwrap(), idx);
             Self::owned_key_from_string(result_string)
         } else {
@@ -1702,8 +1702,6 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
             }
         }
     }
-
-//GOATGOATGOAT change the name of "UNICODE_KEYS" to "UTF8_KEYS"
 
     /// Convenience function that returns the [edit_distance](Table::edit_distance) function associated with a Table
     pub fn default_distance_func(&self) -> impl Fn(&[KeyCharT], &[KeyCharT]) -> u64 {
@@ -2074,7 +2072,7 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     }
 }
 
-impl <KeyCharT, ValueT, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize, const UNICODE_KEYS : bool>Drop for Table<KeyCharT, ValueT, MAX_DELETES, MEANINGFUL_KEY_LEN, UNICODE_KEYS> {
+impl <KeyCharT, ValueT, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize, const UTF8_KEYS : bool>Drop for Table<KeyCharT, ValueT, MAX_DELETES, MEANINGFUL_KEY_LEN, UTF8_KEYS> {
     fn drop(&mut self) {
         //Close down Rocks
         self.db.flush().unwrap();
