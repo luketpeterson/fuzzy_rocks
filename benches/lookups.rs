@@ -5,7 +5,7 @@ use fuzzy_rocks::{*};
 pub fn london_lookup_benchmark(c: &mut Criterion) {
 
     //Initialize the table with a very big database
-    let table = Table::<i32, 2, 12, true>::new("all_cities.geonames.rocks").unwrap();
+    let table = Table::<char, i32, 2, 12, true>::new("all_cities.geonames.rocks").unwrap();
 
     c.bench_function("lookup_exact_london", |b| b.iter(|| black_box( {
         let iter = table.lookup_exact("london").unwrap();

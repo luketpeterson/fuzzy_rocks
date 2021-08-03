@@ -5,15 +5,16 @@
 //! distance function accelerated by the [SymSpell](https://github.com/wolfgarbe/SymSpell) algorithm.
 //! 
 //! The reasons to use this crate over another SymSpell implementation are:
+//! - You have non-character-based keys (e.g. DNA snippets, etc.)
 //! - You want to use a custom distance function
 //! - Startup time matters more than lookups-per-second
-//! - You have millions of keys and care about resident memory footprint
+//! - You have millions of keys and care about memory footprint
 //! 
 //! ## Records
 //! 
 //! This crate manages records, each of which has a unique [RecordID].  Keys are used to perform fuzzy
-//! lookups but keys are not guaranteed to be unique. [Insert](Table::insert)ing the same key into a [Table] twice
-//! will result in two distinct records.
+//! lookups but keys are not guaranteed to be unique. [Insert](Table::insert)ing the same key into a [Table]
+//! twice will result in two distinct records, and both records will be found by lookups of that key.
 //! 
 //! ## Usage Example
 //! 
@@ -21,7 +22,7 @@
 //! use fuzzy_rocks::{*};
 //! 
 //! //Create and reset the FuzzyRocks Table
-//! let mut table = Table::<String, 2, 8, true>::new("test.rocks").unwrap();
+//! let mut table = Table::<char, String, 2, 8, true>::new("test.rocks").unwrap();
 //! table.reset().unwrap();
 //!
 //! //Insert some records
@@ -104,8 +105,8 @@
 //! The fuzzy_rocks implementation has a few additional details to be aware of:
 //! 
 //! - fuzzy_rocks won't find keys that don't have at least one character in common, regardless of the value
-//! of `MAX_DELETES`.  For example the key `of` won't be found by the query string `hi`, even with a distance
-//! of 2 (or any other value).  This decision was made because the variant space becomes very crowded near
+//! of `MAX_DELETES`.  For example the key `me` won't be found by the query string `hi`, even with a distance
+//! of 2 (or any other value).  This decision was made because the variant space becomes very crowded
 //! for short keys, and the extreme example of the empty-string variant was severely damaging performance with
 //! short keys.
 //! 
@@ -125,6 +126,8 @@
 //! 
 //! GOATGOATGOAT, Write-up on perf_counters, how to enable, etc.
 //! 
+//! GOATGOATGOAT, Write-up on benchmarks.  How to edit, how to run.
+//! 
 //! A smaller `MAX_DELETES` value will perform better but be able to find fewer results for a search.
 //! 
 //! A higher value for `MEANINGFUL_KEY_LEN` will result in fewer wasted evaluations of the distance function
@@ -143,8 +146,18 @@
 //! and licensed under a [Creative Commons Attribution 4.0 License](https://creativecommons.org/licenses/by/4.0/legalcode)
 //! 
 
+//GOATGOATGOAT, write up:
+// 0.) DNA snippet example.  Look at FAStA Wikipedia article
+// 1.) How SymSpell works best with sparse key spaces, but a BK-Tree is better for dense key spaces
+// 2.) How we have "Future Work" to add a BK tree to search within a key group
+//      consider adding a "k-nn query", in addition to or instead of the "best" query
+
+//GOATGOATGOAT
+//Create a parameter block for generic initialization.
+// The distance function should be part of the parameter block, and therefore part of the table
+
 use core::marker::PhantomData;
-use core::borrow::Borrow;
+//use core::borrow::Borrow; //GOAT
 use core::cmp::{min, Ordering};
 use core::hash::Hash;
 
@@ -156,10 +169,11 @@ use num_traits::Zero;
 use serde::{Serialize, Deserialize};
 use bincode::Options;
 
+use std::{slice};
 use std::collections::{HashMap, HashSet};
-use std::convert::TryInto;
+use std::convert::{TryInto};
 use std::iter::FromIterator;
-use std::mem::{MaybeUninit};
+use std::mem::{MaybeUninit, forget, size_of, transmute};
 
 use rocksdb::{DB, DBWithThreadMode, ColumnFamily, ColumnFamilyDescriptor, MergeOperands};
 
@@ -192,14 +206,15 @@ use rocksdb::{DB, DBWithThreadMode, ColumnFamily, ColumnFamilyDescriptor, MergeO
 /// performance cost, however, so passing `false` is more efficient if you plan to use regular ascii or
 /// any other kind of data as the table's keys.
 /// 
-pub struct Table<ValueT : Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize, const UNICODE_KEYS : bool> {
+pub struct Table<KeyCharT, ValueT, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize, const UNICODE_KEYS : bool> {
     record_count : usize,
     db : DBWithThreadMode<rocksdb::SingleThreaded>,
     path : String,
     deleted_records : Vec<RecordID>, //NOTE: Currently we don't try to hold onto deleted records across unloads, but we may change this in the future.
     #[cfg(feature = "perf_counters")]
     perf_counters : Cell<PerfCounters>,
-    phantom: PhantomData<ValueT>,
+    phantom_key: PhantomData<KeyCharT>,
+    phantom_value: PhantomData<ValueT>,
 }
 
 /// Performance counters for optimizing [Table] parameters.
@@ -283,14 +298,14 @@ impl RecordData {
 /// A transient struct to keep track of the multiple key groups, reflecting what's in the DB.
 /// Used when assembling key groups or adding new keys to existing groups
 #[derive(Clone)]
-struct KeyGroups {
+struct KeyGroups<OwnedKeyT> {
     variant_reverse_lookup_map : HashMap<Vec<u8>, usize>,
     key_group_variants : Vec<HashSet<Vec<u8>>>,
-    key_group_keys : Vec<HashSet<Vec<u8>>>,
+    key_group_keys : Vec<HashSet<OwnedKeyT>>,
     group_ids : Vec<usize> //The contents of this vec correspond to the KeyGroupID
 }
 
-impl KeyGroups {
+impl <OwnedKeyT>KeyGroups<OwnedKeyT> {
     fn new() -> Self {
         Self{
             variant_reverse_lookup_map : HashMap::new(),
@@ -326,7 +341,334 @@ const RECORD_DATA_CF_NAME : &str = "rec_data";
 const VALUES_CF_NAME : &str = "values";
 const VARIANTS_CF_NAME : &str = "variants";
 
-impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize, const UNICODE_KEYS : bool>Table<ValueT, MAX_DELETES, MEANINGFUL_KEY_LEN, UNICODE_KEYS> {
+/// A private trait representing the subset of key types that are owned and therefore 'static
+//GOAT, make this trait private, which means refactoring the modules
+pub trait OwnedKey<KeyCharT> : 'static + Sized + Serialize + serde::de::DeserializeOwned + Key<'static, KeyCharT> {
+    fn as_string(&self) -> Option<String>;
+    fn borrow_str(&self) -> Option<&str>;
+    fn as_vec(&self) -> Option<Vec<KeyCharT>>;
+    fn borrow_vec(&self) -> Option<&[KeyCharT]>;
+}
+
+impl OwnedKey<char> for String {
+    fn as_string(&self) -> Option<String> {
+        Some(self.clone())
+    }
+    fn borrow_str(&self) -> Option<&str> {
+        Some(self)
+    }
+    fn as_vec(&self) -> Option<Vec<char>> {
+        Some(self.chars().collect())
+    }
+    fn borrow_vec(&self) -> Option<&[char]> {
+        None
+    }
+}
+
+impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned>OwnedKey<KeyCharT> for Vec<KeyCharT> {
+    fn as_string(&self) -> Option<String> {
+        None
+    }
+    fn borrow_str(&self) -> Option<&str> {
+        None
+    }
+    fn as_vec(&self) -> Option<Vec<KeyCharT>> {
+        Some(self.clone())
+    }
+    fn borrow_vec(&self) -> Option<&[KeyCharT]> {
+        Some(&self[..])
+    }
+}
+
+/// A private trait implemented by a [Table] to provide access to the keys in the DB, 
+/// whether they are UTF-8 encoded strings or arrays of KeyCharT
+//GOAT, Make this private by moving it to a private module
+pub trait TableKeyEncoding<KeyCharT> {
+    type OwnedKeyT : OwnedKey<KeyCharT>;
+
+    fn owned_key_into_vec(key : Self::OwnedKeyT) -> Vec<KeyCharT>;
+    fn owned_key_from_string(s : String) -> Self::OwnedKeyT;
+    fn owned_key_from_vec(v : Vec<KeyCharT>) -> Self::OwnedKeyT;
+    fn owned_key_from_key<'a, K : Key<'a, KeyCharT>>(k : &K) -> Self::OwnedKeyT;
+}
+
+impl <ValueT, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize>TableKeyEncoding<char> for Table<char, ValueT, MAX_DELETES, MEANINGFUL_KEY_LEN, true> {
+    type OwnedKeyT = String;
+    
+    fn owned_key_into_vec(key : Self::OwnedKeyT) -> Vec<char> {
+        key.chars().collect()
+    }
+    fn owned_key_from_string(s : String) -> Self::OwnedKeyT {
+        s
+    }
+    fn owned_key_from_vec(_v : Vec<char>) -> Self::OwnedKeyT {
+        panic!() //NOTE: Should never be called when the OwnedKeyT isn't a Vec
+    }
+    fn owned_key_from_key<'a, K : Key<'a, char>>(k : &K) -> Self::OwnedKeyT {
+        k.borrow_key_str().unwrap().to_string() //NOTE: the unwrap() will panic if called with the wrong kind of key
+    }
+}
+impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned, ValueT, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize>TableKeyEncoding<KeyCharT> for Table<KeyCharT, ValueT, MAX_DELETES, MEANINGFUL_KEY_LEN, false> {
+    type OwnedKeyT = Vec<KeyCharT>;
+    
+    fn owned_key_into_vec(key : Self::OwnedKeyT) -> Vec<KeyCharT> {
+        key
+    }
+    fn owned_key_from_string(_s : String) -> Self::OwnedKeyT {
+        panic!() //NOTE: Should never be called when the OwnedKeyT isn't a String
+    }
+    fn owned_key_from_vec(v : Vec<KeyCharT>) -> Self::OwnedKeyT {
+        v
+    }
+    fn owned_key_from_key<'a, K : Key<'a, KeyCharT>>(k : &K) -> Self::OwnedKeyT {
+        k.get_key_chars()
+    }
+}
+
+/// Implemented by all types that can be used as keys, whether they are UTF-8 encoded
+/// strings or arrays of KeyCharT
+pub trait Key<'a, KeyCharT> : KeyUnsafe<'a, KeyCharT> {
+
+    fn num_chars(&self) -> usize;
+    fn as_bytes(&self) -> &[u8];
+    fn into_bytes(self) -> Vec<u8>;
+    fn borrow_key_chars(&self) -> Option<&[KeyCharT]>;
+    fn get_key_chars(&self) -> Vec<KeyCharT>;
+    fn borrow_key_str(&self) -> Option<&str>;
+    fn from_owned<OwnedKeyT : OwnedKey<KeyCharT>>(owned_key : &'a OwnedKeyT) -> Self;
+}
+
+/// The private unsafe accessors for the Key trait
+//GOATGOAT, Make this private, which means refactoring the modules.
+pub trait KeyUnsafe<'a, KeyCharT> : Eq + Hash + Clone + Serialize {
+    /// This function may return a result that borrows the owned_key parameter, but the
+    /// returned result may have a longer lifetime on account of the type it's called with
+    unsafe fn from_owned_unsafe<OwnedKeyT : OwnedKey<KeyCharT>>(owned_key : &OwnedKeyT) -> Self;
+}
+
+//GOATGOAT
+// impl <'a, KeyCharT, T>Key<'a, KeyCharT> for &'a T
+//     where
+//     T : Key<'a, KeyCharT>
+// {
+//     fn num_chars(&self) -> usize {
+//         self.num_chars()
+//     }
+
+// }
+
+// impl <'a, KeyCharT, T>KeyUnsafe<'a, KeyCharT> for &'a T
+//     where
+//     T : KeyUnsafe<'a, KeyCharT>
+// {
+//     //GOAT
+//     // unsafe fn from_owned_unsafe<OwnedKeyT : OwnedKey<KeyCharT>>(owned_key : &OwnedKeyT) -> Self {
+//     //     let result = owned_key.borrow_vec().unwrap();
+//     //     unsafe { transmute::<&[KeyCharT], &'a [KeyCharT]>(result) }    
+//     // }
+// }
+
+impl <'a, KeyCharT>Key<'a, KeyCharT> for &'a [KeyCharT]
+    where
+    KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned,
+{
+    fn num_chars(&self) -> usize {
+        self.len()
+    }
+
+    // fn as_bytes(&self) -> &[u8] {
+    //     slice::<KeyCharT>::as_bytes(self)
+    // }
+    //GOATGOAT, is this above possible???
+    fn as_bytes(&self) -> &[u8] {
+        let len = self.len();
+        unsafe { slice::from_raw_parts(self.as_ptr() as *const u8, size_of::<KeyCharT>() * len) }
+        //GOAT, Ask "Is Copy bound enough to make this safe"
+    }
+
+    // fn into_bytes(self) -> Vec<u8> {
+    //     slice::<KeyCharT>::into_bytes(self)
+    // }
+    //GOATGOAT, is the above possible?
+    fn into_bytes(self) -> Vec<u8> {
+
+        let mut owned_vec = self.to_vec();
+
+        //Now transmute the vec into a vec of bytes
+        let len = self.len();
+        let result = unsafe { Vec::<u8>::from_raw_parts(owned_vec.as_mut_ptr() as *mut u8, size_of::<KeyCharT>() * len, size_of::<KeyCharT>() * len) };
+        forget(owned_vec); //So we don't get a double-free
+        result
+    }
+
+    fn borrow_key_chars(&self) -> Option<&[KeyCharT]> {
+        Some(self)
+    }
+
+    fn get_key_chars(&self) -> Vec<KeyCharT> {
+        self.to_vec()
+    }
+
+    fn borrow_key_str(&self) -> Option<&str> {
+        None
+    }
+
+    fn from_owned<OwnedKeyT : OwnedKey<KeyCharT>>(owned_key : &'a OwnedKeyT) -> Self {
+        owned_key.borrow_vec().unwrap()
+    }
+}
+
+impl <'a, KeyCharT>KeyUnsafe<'a, KeyCharT> for &'a [KeyCharT]
+    where
+    KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned,
+{
+    unsafe fn from_owned_unsafe<OwnedKeyT : OwnedKey<KeyCharT>>(owned_key : &OwnedKeyT) -> Self {
+        let result = owned_key.borrow_vec().unwrap();
+        transmute::<&[KeyCharT], &'a [KeyCharT]>(result)
+    }
+}
+
+impl <KeyCharT>Key<'_, KeyCharT> for Vec<KeyCharT>
+    where
+    KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned,
+{
+    fn num_chars(&self) -> usize {
+        self.len()
+    }
+
+    // fn as_bytes(&self) -> &[u8] {
+    //     self.as_bytes()
+    // }
+    //GOATGOAT, is the above possible?
+    fn as_bytes(&self) -> &[u8] {
+        let len = self.len();
+        unsafe { slice::from_raw_parts(self.as_ptr() as *const u8, size_of::<KeyCharT>() * len) }
+        //GOAT, Ask "Is Copy bound enough to make this safe"
+    }
+
+    // fn into_bytes(self) -> Vec<u8> {
+    //     self.into_bytes()
+    // }
+//GOATGOAT, is the above possible?
+    fn into_bytes(self) -> Vec<u8> {
+        let mut mut_self = self;
+        let len = mut_self.len();
+        let result = unsafe { Vec::<u8>::from_raw_parts(mut_self.as_mut_ptr() as *mut u8, size_of::<KeyCharT>() * len, size_of::<KeyCharT>() * len) };
+        forget(mut_self); //So we don't get a double-free
+
+        result
+    }
+
+    fn borrow_key_chars(&self) -> Option<&[KeyCharT]> {
+        Some(&self[..])
+    }
+
+    fn get_key_chars(&self) -> Vec<KeyCharT> {
+        self.clone()
+    }
+
+    fn borrow_key_str(&self) -> Option<&str> {
+        None
+    }
+
+    fn from_owned<OwnedKeyT : OwnedKey<KeyCharT>>(owned_key : &OwnedKeyT) -> Self {
+        owned_key.as_vec().unwrap()
+    }
+}
+
+impl <KeyCharT>KeyUnsafe<'_, KeyCharT> for Vec<KeyCharT>
+    where
+    KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned,
+{
+    unsafe fn from_owned_unsafe<OwnedKeyT : OwnedKey<KeyCharT>>(owned_key : &OwnedKeyT) -> Self {
+        //This implementation is actually safe, but the fn prototype is unsafe
+        owned_key.as_vec().unwrap()
+    }
+}
+
+impl <'a>Key<'a, char> for &'a str
+{
+    fn num_chars(&self) -> usize {
+        unicode_len(self)
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        str::as_bytes(self)
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        let bytes_slice = str::as_bytes(self);
+        bytes_slice.to_vec()
+    }
+
+    fn borrow_key_chars(&self) -> Option<&[char]> {
+        None
+    }
+
+    fn get_key_chars(&self) -> Vec<char> {
+        self.chars().collect()
+    }
+
+    fn borrow_key_str(&self) -> Option<&str> {
+        Some(self)
+    }
+
+    fn from_owned<OwnedKeyT : OwnedKey<char>>(owned_key : &'a OwnedKeyT) -> Self {
+        owned_key.borrow_str().unwrap()
+    }
+
+}
+
+impl <'a>KeyUnsafe<'a, char> for &'a str {
+
+    unsafe fn from_owned_unsafe<OwnedKeyT : OwnedKey<char>>(owned_key : &OwnedKeyT) -> Self {
+        let result = owned_key.borrow_str().unwrap();
+        transmute::<&str, &'a str>(result)
+    }
+}
+
+impl Key<'_, char> for String
+{
+    fn num_chars(&self) -> usize {
+        unicode_len(self)
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        self.as_bytes()
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        self.into_bytes()
+    }
+
+    fn borrow_key_chars(&self) -> Option<&[char]> {
+        None
+    }
+
+    fn get_key_chars(&self) -> Vec<char> {
+        self.chars().collect()
+    }
+
+    fn borrow_key_str(&self) -> Option<&str> {
+        Some(&self)
+    }
+
+    fn from_owned<OwnedKeyT : OwnedKey<char>>(owned_key : &OwnedKeyT) -> Self {
+        owned_key.as_string().unwrap()
+    }
+}
+
+impl KeyUnsafe<'_, char> for String {
+
+    unsafe fn from_owned_unsafe<OwnedKeyT : OwnedKey<char>>(owned_key : &OwnedKeyT) -> Self {
+        //This implementation is actually safe, but the fn prototype is unsafe
+        owned_key.as_string().unwrap()
+    }
+}
+
+/// The implementation of the shared parts of Table
+impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::DeserializeOwned, ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize, const UNICODE_KEYS : bool>Table<KeyCharT, ValueT, MAX_DELETES, MEANINGFUL_KEY_LEN, UNICODE_KEYS>
+    where Self : TableKeyEncoding<KeyCharT> {
 
     /// Creates a new Table, backed by the database at the path provided
     /// 
@@ -368,7 +710,8 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
             deleted_records : vec![],
             #[cfg(feature = "perf_counters")]
             perf_counters : Cell::new(PerfCounters::new()),
-            phantom : PhantomData
+            phantom_key : PhantomData,
+            phantom_value : PhantomData
         })
     }
 
@@ -422,10 +765,14 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         for key_group in self.get_key_groups(record_id)? {
 
             //Get all the keys for the group we're removing, so we can compute all the variants
-            let raw_keys_iter = self.get_keys_in_group(key_group)?;
+            let keys_iter = self.get_keys_in_group(key_group)?;
             let mut variants = HashSet::new();
-            for raw_key in raw_keys_iter {
-                let key_variants = Self::variants(&raw_key);
+            for key in keys_iter {
+                //GOATGOAT DEAD
+                // let key_char_vec = Self::owned_key_into_vec(key);
+                // let key_variants = Self::variants(&key_char_vec[..]);
+
+                let key_variants = Self::variants(&key);
                 variants.extend(key_variants);
             }
 
@@ -486,16 +833,17 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         Ok(())
     }
 
-
     /// Creates entries in the keys table.  If we are updating an old record, we will overwrite it.
     /// 
     /// NOTE: This function will NOT update any variants used to locate the key
-    fn put_key_group_internal<K : Borrow<[u8]> + Eq + Hash + Serialize>(&mut self, key_group_id : KeyGroupID, raw_keys : &HashSet<K>) -> Result<(), String> {
+    fn put_key_group_internal<K : Eq + Hash + Serialize>(&mut self, key_group_id : KeyGroupID, raw_keys : &HashSet<K>) -> Result<(), String> {
         
-        //Create the keys vector, serialize it, and put in into the keys table.
-        let keys_cf_handle = self.db.cf_handle(KEYS_CF_NAME).unwrap();
+        //Serialize the keys into a vec of bytes
         let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
         let keys_bytes = record_coder.serialize(&raw_keys).unwrap();
+
+        //Put the vector of keys into the keys table
+        let keys_cf_handle = self.db.cf_handle(KEYS_CF_NAME).unwrap();
         self.db.put_cf(keys_cf_handle, usize::to_le_bytes(key_group_id.0), keys_bytes)?;
 
         Ok(())
@@ -504,7 +852,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// Divides the keys up into key groups and assigns them to a record.
     /// 
     /// Should NEVER be called on a record that already has keys or orphaned database entries will result
-    fn put_record_keys<K : Borrow<[u8]> + Eq + Hash + Serialize, KeysIterT : Iterator<Item=K>>(&mut self, record_id : RecordID, keys_iter : KeysIterT, num_keys : usize) -> Result<(), String> {
+    fn put_record_keys<'a, K : Key<'a, KeyCharT> + 'a, KeysIterT : Iterator<Item=&'a K>>(&mut self, record_id : RecordID, keys_iter : KeysIterT, num_keys : usize) -> Result<(), String> {
     
         //Make groups for the keys
         let groups = Self::make_groups_from_keys(keys_iter, num_keys).unwrap();
@@ -531,15 +879,15 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// This function is the owner of the decision whether or not to add a key to an existing
     /// group or to create a new group for a key
-    fn add_key_to_groups<K : Borrow<[u8]> + Eq + Hash + Serialize>(key : K, groups : &mut KeyGroups, update_reverse_map : bool) -> Result<(), String> {
+    fn add_key_to_groups<'a, K : Key<'a, KeyCharT>>(key : &K, groups : &mut KeyGroups<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>, update_reverse_map : bool) -> Result<(), String> {
         
         //Make sure the key is within the maximum allowable MAX_KEY_LENGTH
-        if key.borrow().len() > MAX_KEY_LENGTH {
+        if key.num_chars() > MAX_KEY_LENGTH {
             return Err("key length exceeds MAX_KEY_LENGTH".to_string());
         }
 
         //Compute the variants for the key
-        let key_variants = Self::variants(key.borrow());
+        let key_variants = Self::variants(key);
 
         //Variables that determine which group we merge into, or whether we create a new key group
         let mut group_idx; //The index of the key group we'll merge this key into
@@ -547,7 +895,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
 
         //If we already have exactly this key as a variant, then we will add the key to that
         // key group
-        if let Some(existing_group) = groups.variant_reverse_lookup_map.get(key.borrow()) {
+        if let Some(existing_group) = groups.variant_reverse_lookup_map.get(key.as_bytes()) {
             group_idx = *existing_group;
             create_new_group = false;
         } else {
@@ -592,7 +940,8 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
             //A. We have no overlap with any existing group, so we will create a new group for this key
             group_idx = groups.key_group_keys.len();
             let mut new_set = HashSet::with_capacity(1);
-            new_set.insert(key.borrow().to_vec());
+            //new_set.insert(<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT::from(key)); //GOATGOATGOAT, this is what I want, not the line below
+            new_set.insert(Self::owned_key_from_key(key));
             groups.key_group_keys.push(new_set);
             groups.key_group_variants.push(key_variants.clone());
             //We can't count on the KeyGroupIDs not having holes so we need to use a function to
@@ -601,7 +950,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
             groups.group_ids.push(new_group_id);
         } else {
             //B. We will append the key to the existing group at group_index, and merge the variants
-            groups.key_group_keys[group_idx].insert(key.borrow().to_vec());
+            groups.key_group_keys[group_idx].insert(Self::owned_key_from_key(key));
             groups.key_group_variants[group_idx].extend(key_variants.clone());
         }
 
@@ -618,13 +967,13 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// Divides a list of keys up into one or more key groups based on some criteria; the primary
     /// of which is the overlap between key variants.  Keys with more overlapping variants are more
     /// likely to belong in the same group and keys with fewer or none are less likely.
-    fn make_groups_from_keys<K : Borrow<[u8]> + Eq + Hash + Serialize, KeysIterT : Iterator<Item=K>>(keys_iter : KeysIterT, num_keys : usize) -> Result<KeyGroups, String> {
+    fn make_groups_from_keys<'a, K : Key<'a, KeyCharT> + 'a, KeysIterT : Iterator<Item=&'a K>>(keys_iter : KeysIterT, num_keys : usize) -> Result<KeyGroups<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>, String> {
 
         //Start with empty key groups, and add the keys one at a time
         let mut groups = KeyGroups::new();
-        for (key_idx, raw_key) in keys_iter.enumerate() {
+        for (key_idx, key) in keys_iter.enumerate() {
             let update_reverse_map = key_idx < num_keys-1;
-            Self::add_key_to_groups(raw_key, &mut groups, update_reverse_map)?;
+            Self::add_key_to_groups(key, &mut groups, update_reverse_map)?;
         }
 
         Ok(groups)
@@ -634,7 +983,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// This function is used when adding new keys to a record, and figuring out which groups to
     /// merge the keys into
-    fn load_key_groups(&self, record_id : RecordID) -> Result<KeyGroups, String> {
+    fn load_key_groups(&self, record_id : RecordID) -> Result<KeyGroups<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>, String> {
 
         let mut groups = KeyGroups::new();
 
@@ -648,7 +997,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
             for key in self.get_keys_in_group(key_group)? {
 
                 //Compute the variants for the key, and merge them into the group variants
-                let key_variants = Self::variants(key.borrow());
+                let key_variants = Self::variants(&key);
 
                 //Update the reverse_lookup_map with every variant
                 for variant in key_variants.iter() {
@@ -685,7 +1034,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     }
 
     /// Add additional keys to a record, including creation of all associated variants
-    fn add_keys_internal<K : Borrow<[u8]> + Eq + Hash + Serialize, KeysIterT : Iterator<Item=K>>(&mut self, record_id : RecordID, keys_iter : KeysIterT, num_keys : usize) -> Result<(), String> {
+    fn add_keys_internal<'a, K : Key<'a, KeyCharT> + 'a, KeysIterT : Iterator<Item=&'a K>>(&mut self, record_id : RecordID, keys_iter : KeysIterT, num_keys : usize) -> Result<(), String> {
 
         //Get the record's existing key groups and variants, so we can figure out the
         //best places for each additional new key
@@ -735,7 +1084,13 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// If one of the specified keys is not associated with the record then that specified
     /// key will be ignored.
-    fn remove_keys_internal<K : Borrow<[u8]> + Eq + Hash + Serialize>(&mut self, record_id : RecordID, remove_keys : &HashSet<K>) -> Result<(), String> {
+//GOATGOATGOAT
+//fn remove_keys_internal(&mut self, record_id : RecordID, remove_keys : &HashSet<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>) -> Result<(), String> {
+    fn remove_keys_internal<'a, K : Key<'a, KeyCharT>>(&mut self, record_id : RecordID, remove_keys : &HashSet<&K>) -> Result<(), String>
+//GOATGOAT
+//        where K : Borrow<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>
+//        where <Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT : Borrow<K>
+    {
 
         //Get all of the existing groups
         let group_ids : Vec<KeyGroupID> = self.get_key_groups(record_id)?.collect();
@@ -749,7 +1104,17 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
             let mut deleted_keys = HashSet::new();
             let mut remaining_keys = HashSet::new();
             for existing_key in self.get_keys_in_group(*key_group)? {
-                if !remove_keys.contains(&*existing_key) {
+
+                //NOTE: We know this is safe because the unsafety comes from the fact that
+                // query_key might borrow existing_key, which is temporary, while query_key's
+                // lifetime is 'a, which is beyond this function.  However, query_key doesn't
+                // outlast this unsafe scope and we know HashSet::contains won't hold onto it.
+                let set_contains_key = unsafe {
+                    let query_key = K::from_owned_unsafe(&existing_key);
+                    remove_keys.contains(&query_key)
+                };
+                
+                if !set_contains_key {
                     remaining_keys.insert(existing_key);
                     remaining_key_count += 1;
                 } else {
@@ -779,14 +1144,14 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
             //Compute all variants for the keys we're removing from this group
             let mut remove_keys_variants = HashSet::new();
             for remove_key in deleted_group_keys_sets[idx].iter() {
-                let keys_variants = Self::variants(&*remove_key);
+                let keys_variants = Self::variants(remove_key);
                 remove_keys_variants.extend(keys_variants);
             }
 
             //Compute all the variants for the keys that must remain in the group
             let mut remaining_keys_variants = HashSet::new();
             for remaining_key in remaining_group_keys_sets[idx].iter() {
-                let keys_variants = Self::variants(&*remaining_key);
+                let keys_variants = Self::variants(remaining_key);
                 remaining_keys_variants.extend(keys_variants);
             }
 
@@ -817,12 +1182,12 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     }
 
     /// Replaces all of the keys in a record with the supplied keys
-    fn replace_keys_internal<K : Borrow<[u8]>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
+    fn replace_keys_internal<'a, K : Key<'a, KeyCharT>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
 
         if keys.len() < 1 {
             return Err("record must have at least one key".to_string());
         }
-        if keys.iter().any(|key| key.borrow().len() > MAX_KEY_LENGTH) {
+        if keys.iter().any(|key| key.num_chars() > MAX_KEY_LENGTH) {
             return Err("key length exceeds MAX_KEY_LENGTH".to_string());
         }
 
@@ -830,7 +1195,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         self.delete_keys_internal(record_id)?;
 
         //Set the keys on the new record
-        self.put_record_keys(record_id, keys.into_iter().map(|key| key.borrow()), keys.len())
+        self.put_record_keys(record_id, keys.into_iter(), keys.len())
     }
 
     /// Deletes a record's value in the values table
@@ -880,7 +1245,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    fn insert_internal<K : Borrow<[u8]> + Eq + Hash + Serialize, KeysIterT : Iterator<Item=K>>(&mut self, keys_iter : KeysIterT, num_keys : usize, value : &ValueT) -> Result<RecordID, String> {
+    fn insert_internal<'a, K : Key<'a, KeyCharT> + 'a, KeysIterT : Iterator<Item=&'a K>>(&mut self, keys_iter : KeysIterT, num_keys : usize, value : &ValueT) -> Result<RecordID, String> {
 
         if num_keys < 1 {
             return Err("record must have at least one key".to_string());
@@ -912,14 +1277,14 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// the closure to avoid doing duplicate work.
     /// 
     /// QUESTION: should the visitor closure be able to return a bool, to mean "stop" or "keep going"?
-    fn visit_fuzzy_candidates<F : FnMut(KeyGroupID)>(&self, raw_key : &[u8], mut visitor : F) -> Result<(), String> {
+    fn visit_fuzzy_candidates<'a, K : Key<'a, KeyCharT>, F : FnMut(KeyGroupID)>(&self, key : &K, mut visitor : F) -> Result<(), String> {
 
-        if raw_key.len() > MAX_KEY_LENGTH {
+        if key.num_chars() > MAX_KEY_LENGTH {
             return Err("key length exceeds MAX_KEY_LENGTH".to_string());
         }
 
         //Create all of the potential variants based off of the "meaningful" part of the key
-        let variants = Self::variants(raw_key);
+        let variants = Self::variants(key);
 
         //Check to see if we have entries in the "variants" database for any of the key variants
         let variants_cf_handle = self.db.cf_handle(VARIANTS_CF_NAME).unwrap();
@@ -948,7 +1313,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         Ok(())
     }
 
-    fn lookup_fuzzy_raw_internal(&self, raw_key : &[u8]) -> Result<impl Iterator<Item=RecordID>, String> {
+    fn lookup_fuzzy_raw_internal<'a, K : Key<'a, KeyCharT>>(&self, key : &K) -> Result<impl Iterator<Item=RecordID>, String> {
 
         //Create a new HashSet to hold all of the RecordIDs that we find
         let mut result_set = HashSet::new(); //TODO, may want to allocate this with a non-zero capacity
@@ -959,7 +1324,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         };
 
         //Visit all the potential records
-        self.visit_fuzzy_candidates(raw_key, raw_visitor_closure)?;
+        self.visit_fuzzy_candidates(key, raw_visitor_closure)?;
 
         //Return an iterator through the HashSet we just made
         Ok(result_set.into_iter())
@@ -974,12 +1339,21 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// It would be necessary to evaluate every key group for a particular record before returning the
     /// record.  The decision not to do this is on account of the fact that [lookup_fuzzy_raw_internal]
     /// could be used instead if the caller wants a quick-to-return iterator.
-    fn lookup_fuzzy_internal<D : 'static + Copy + Zero + PartialOrd, F : Fn(&[u8], &[u8])->D>(&self, raw_key : &[u8], distance_function : F, threshold : Option<D>) -> Result<impl Iterator<Item=(RecordID, D)>, String> {
+    fn lookup_fuzzy_internal<'a, K : Key<'a, KeyCharT>, D : 'static + Copy + Zero + PartialOrd, F : Fn(&[KeyCharT], &[KeyCharT])->D>(&self, key : &K, distance_function : F, threshold : Option<D>) -> Result<impl Iterator<Item=(RecordID, D)>, String> {
 
         //Create a new HashMap to hold all of the RecordIDs that we might want to return, and the lowest
         // distance we find for that particular record
         let mut result_map = HashMap::new(); //TODO, may want to allocate this with a non-zero capacity
         let mut visited_groups = HashSet::new();
+
+        //If we can borrow the lookup chars directly then do it, otherwise get them from a buffer
+        let key_chars_vec;
+        let looup_key_chars = if let Some(key_chars) = key.borrow_key_chars() {
+            key_chars
+        } else {
+            key_chars_vec = key.get_key_chars();
+            &key_chars_vec[..]
+        };
 
         //Our visitor closure tests the key using the distance function and threshold
         let lookup_fuzzy_visitor_closure = |key_group_id : KeyGroupID| {
@@ -992,9 +1366,11 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
 
                 //Check the record's keys with the distance function and find the smallest distance
                 let mut record_keys_iter = self.get_keys_in_group(key_group_id).unwrap().into_iter();
-                let mut smallest_distance = distance_function(&record_keys_iter.next().unwrap()[..], raw_key); //If we have a zero-element keys array, it's a bug elsewhere
+                let record_key_chars = Self::owned_key_into_vec(record_keys_iter.next().unwrap()); //If we have a zero-element keys array, it's a bug elsewhere, so this unwrap should always succeed
+                let mut smallest_distance = distance_function(&record_key_chars[..], &looup_key_chars[..]); 
                 for record_key in record_keys_iter {
-                    let distance = distance_function(&record_key, raw_key);
+                    let record_key_chars = Self::owned_key_into_vec(record_key);
+                    let distance = distance_function(&record_key_chars, &looup_key_chars[..]);
                     if distance < smallest_distance {
                         smallest_distance = distance;
                     }
@@ -1018,24 +1394,24 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         };
 
         //Visit all the potential records
-        self.visit_fuzzy_candidates(raw_key, lookup_fuzzy_visitor_closure)?;
+        self.visit_fuzzy_candidates(key, lookup_fuzzy_visitor_closure)?;
 
         //Return an iterator through the HashSet we just made
         Ok(result_map.into_iter())
     }
 
-    fn lookup_best_internal<D : 'static + Copy + Zero + PartialOrd, F : Fn(&[u8], &[u8])->D>(&self, raw_key : &[u8], distance_function : F) -> Result<impl Iterator<Item=RecordID>, String> {
+    fn lookup_best_internal<'a, K : Key<'a, KeyCharT>, D : 'static + Copy + Zero + PartialOrd, F : Fn(&[KeyCharT], &[KeyCharT])->D>(&self, key : &K, distance_function : F) -> Result<impl Iterator<Item=RecordID>, String> {
 
         //First, we should check to see if lookup_exact gives us what we want.  Because if it does,
         // it's muuuuuuch faster.  If we have an exact result, no other key will be a better match
-        let mut results_vec = self.lookup_exact_internal(raw_key)?;
+        let mut results_vec = self.lookup_exact_internal(key)?;
         if results_vec.len() > 0 {
             return Ok(results_vec.into_iter());
         }
         
         //Assuming lookup_exact didn't work, we'll need to perform the whole fuzzy lookup and iterate each key
         //to figure out the closest distance
-        let mut result_iter = self.lookup_fuzzy_internal(raw_key, distance_function, None)?;
+        let mut result_iter = self.lookup_fuzzy_internal(key, distance_function, None)?;
         
         if let Some(first_result) = result_iter.next() {
             let mut best_distance = first_result.1;
@@ -1060,18 +1436,33 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// Checks the table for records with keys that precisely match the key supplied
     /// 
     /// This function will be more efficient than a fuzzy lookup.
-    fn lookup_exact_internal(&self, raw_key : &[u8]) -> Result<Vec<RecordID>, String> {
+    fn lookup_exact_internal<'a, K : Key<'a, KeyCharT>>(&self, lookup_key : &K) -> Result<Vec<RecordID>, String> {
 
-        if raw_key.len() > MAX_KEY_LENGTH {
+        let lookup_key_len = lookup_key.num_chars();
+        if lookup_key_len > MAX_KEY_LENGTH {
             return Err("key length exceeds MAX_KEY_LENGTH".to_string());
         }
 
-        let meaningful_key = Self::meaningful_key_substring(raw_key);
-        let meaningful_noop = meaningful_key.len() == raw_key.len();
+//GOATGOAT Should the meaningful key be an abstract key or should we have already converted this????????
+//Thinking:
+// 1. The meaningful key needs to be the same type as the key we pass into variants()
+// 2. variants() should output raw bytes Vec<u8>
+// 3. A UTF-8 encoded String is already in the raw bytes form
+// 4. Therefore meaningful_key_substring needs to both take and return an abstract key type.
+//
+//BUUUUUUUTTTTTTTTT....... How the fuck to I create one of those???  There has to be an underlying
+// concrete type.  And what should the len() function mean?  the number of characters, or the number
+// of bytes??????
+//
+// ANSWER: I think I've gotta use the OwnedKeyT
+//
+
+        let meaningful_key = Self::meaningful_key_substring(lookup_key);
+        let meaningful_noop = meaningful_key.num_chars() == lookup_key_len;
 
         //Get the variant for our meaningful_key
         let variants_cf_handle = self.db.cf_handle(VARIANTS_CF_NAME).unwrap();
-        if let Some(variant_vec_bytes) = self.db.get_pinned_cf(variants_cf_handle, meaningful_key)? {
+        if let Some(variant_vec_bytes) = self.db.get_pinned_cf(variants_cf_handle, meaningful_key.as_bytes())? {
 
             let record_ids : Vec<RecordID> = if meaningful_noop {
 
@@ -1084,13 +1475,14 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
 
                 //But if they are different, we need to Iterate every KeyGroupID in the variant in order
                 //  to check if we really have a match on the whole key
+                let owned_lookup_key = Self::owned_key_from_key(lookup_key);
                 bincode_vec_iter::<KeyGroupID>(&variant_vec_bytes)
                 .filter_map(|key_group_id_bytes| {
                     let key_group_id = KeyGroupID(usize::from_le_bytes(key_group_id_bytes.try_into().unwrap()));
                     
                     // Return only the KeyGroupIDs for records if their keys match the key we are looking up
                     let mut keys_iter = self.get_keys_in_group(key_group_id).ok()?;
-                    if keys_iter.any(|key| *key == *raw_key) {
+                    if keys_iter.any(|key| key == owned_lookup_key) {
                         Some(key_group_id)
                     } else {
                         None
@@ -1181,7 +1573,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     }
 
     /// Returns all of the keys for a record, across all key groups
-    fn get_keys_internal<'a>(&'a self, record_id : RecordID) -> Result<impl Iterator<Item=Vec<u8>> + 'a, String> {
+    fn get_keys_internal<'a>(&'a self, record_id : RecordID) -> Result<impl Iterator<Item=<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT> + 'a, String> {
 
         let key_groups_iter = self.get_key_groups(record_id)?;
         let result_iter = key_groups_iter.flat_map(move |key_group| self.get_keys_in_group(key_group).unwrap());
@@ -1190,13 +1582,13 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     }
 
     /// Returns the keys associated with a single key group of a single specified record
-    fn get_keys_in_group(&self, key_group : KeyGroupID) -> Result<impl Iterator<Item=Vec<u8>>, String> {
+    fn get_keys_in_group(&self, key_group : KeyGroupID) -> Result<impl Iterator<Item=<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>, String> {
 
         //Get the keys vec by deserializing the bytes from the db
         let keys_cf_handle = self.db.cf_handle(KEYS_CF_NAME).unwrap();
         if let Some(keys_vec_bytes) = self.db.get_pinned_cf(keys_cf_handle, key_group.0.to_le_bytes())? {
             let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
-            let keys_vec : Vec<Vec<u8>> = record_coder.deserialize(&keys_vec_bytes).unwrap();
+            let keys_vec : Vec<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT> = record_coder.deserialize(&keys_vec_bytes).unwrap();
 
             #[cfg(feature = "perf_counters")]
             {
@@ -1264,75 +1656,78 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     }
 
     // Returns the "meaningful" part of a key, that is used as the starting point to generate the variants
-    fn meaningful_key_substring(key: &[u8]) -> Vec<u8> {
-        Self::unicode_truncate(key, MEANINGFUL_KEY_LEN)
+    fn meaningful_key_substring<'a, K : Key<'a, KeyCharT>>(key: &K) -> <Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT {
+        if UNICODE_KEYS {
+            let result_string = unicode_truncate(key.borrow_key_str().unwrap(), MEANINGFUL_KEY_LEN);
+            Self::owned_key_from_string(result_string)
+        } else {
+            let result_vec = if key.num_chars() > MEANINGFUL_KEY_LEN {
+                let (prefix, _remainder) = key.borrow_key_chars().unwrap().split_at(MEANINGFUL_KEY_LEN);
+                prefix.to_vec()
+            } else {
+                key.get_key_chars()
+            };
+            Self::owned_key_from_vec(result_vec)
+        }
+    }
+
+    // Returns a new owned key, that is a variant of the supplied key, without the character at the
+    // specified index
+    fn remove_char_from_key<'a, K : Key<'a, KeyCharT>>(key: &K, idx : usize) -> <Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT {
+        if UNICODE_KEYS {
+            let result_string = unicode_remove_char(key.borrow_key_str().unwrap(), idx);
+            Self::owned_key_from_string(result_string)
+        } else {
+            let mut result_vec = key.get_key_chars();
+            result_vec.remove(idx);
+            Self::owned_key_from_vec(result_vec)
+        }
     }
 
     /// Returns all of the variants of a key, for querying or adding to the variants database
-    fn variants(key: &[u8]) -> HashSet<Vec<u8>> {
+    fn variants<'a, K : Key<'a, KeyCharT>>(key: &K) -> HashSet<Vec<u8>> {
 
         let mut variants_set : HashSet<Vec<u8>> = HashSet::new();
         
         //We shouldn't make any variants for empty keys
-        if key.len() > 0 {
+        if key.num_chars() > 0 {
 
             //We'll only build variants from the meaningful portion of the key
             let meaningful_key = Self::meaningful_key_substring(key);
 
             if 0 < MAX_DELETES {
-                Self::variants_recursive(&meaningful_key[..], 0, &mut variants_set);
+                Self::variants_recursive(&meaningful_key, 0, &mut variants_set);
             }
-            variants_set.insert(meaningful_key);    
+            variants_set.insert(meaningful_key.into_bytes());    
         }
 
         variants_set
     }
     
     // The recursive part of the variants() function
-    fn variants_recursive(key: &[u8], edit_distance: usize, variants_set: &mut HashSet<Vec<u8>>) {
+    fn variants_recursive<'a, K : Key<'a, KeyCharT>>(key: &K, edit_distance: usize, variants_set: &mut HashSet<Vec<u8>>) {
     
         let edit_distance = edit_distance + 1;
     
-        let key_len = Self::unicode_len(key);
+        let key_len = key.num_chars();
     
         if key_len > 1 {
             for i in 0..key_len {
-                let variant = Self::unicode_remove(key, i);
+                let variant = Self::remove_char_from_key(key, i);
     
-                if !variants_set.contains(&variant) {
+                if !variants_set.contains(variant.as_bytes()) {
     
                     if edit_distance < MAX_DELETES {
                         Self::variants_recursive(&variant, edit_distance, variants_set);
                     }
     
-                    variants_set.insert(variant);
+                    variants_set.insert(variant.into_bytes());
                 }
             }
         }
     }
 
-    // Returns the length of a utf-8 string, stored in a slice of bytes
-    // The "UNICODE_KEYS" path relies on the buffer being valid unicode
-    fn unicode_len(s: &[u8]) -> usize {
-        if UNICODE_KEYS {
-            let the_str = unsafe{std::str::from_utf8_unchecked(s)};
-            the_str.chars().count()
-        } else {
-            s.len()
-        }
-    }
-
-    // Returns the unicode character at the idx, counting through each character in the string
-    // The "UNICODE_KEYS" path relies on the buffer being valid unicode
-    // Will panic if idx is greater than the number of characters in the parsed string
-    fn unicode_char_at_index(s: &[u8], idx : usize) -> char {
-        if UNICODE_KEYS {
-            let the_str = unsafe{std::str::from_utf8_unchecked(s)};
-            the_str.chars().nth(idx).unwrap()
-        } else {
-            s[idx] as char
-        }
-    }
+//GOATGOATGOAT change the name of "UNICODE_KEYS" to "UTF8_KEYS"
 
 //GOATGOATGOAT, Make a Char type associated with the table, that is a char if the UNICODE_KEYS is true and a u8 if its false
 // Then get rid of calls to unicode_char_at_index, and replace them with indexing into a buffer of those...
@@ -1341,47 +1736,31 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
 //GOATGOATGOAT, Write up next steps, to use a char type plumbed throughout, so the symspell algorithm can operate on
 // atoms that aren't u8.
 
-    // Removes a single unicode character at the specified index from a utf-8 string stored in a slice of bytes
-    // The "UNICODE_KEYS" path relies on the buffer being valid unicode
-    fn unicode_remove(s: &[u8], index: usize) -> Vec<u8> {
-        if UNICODE_KEYS {
-            let the_str = unsafe{std::str::from_utf8_unchecked(s)};
-            let new_str : String = the_str.chars()
-                .enumerate()
-                .filter(|(i, _)| *i != index)
-                .map(|(_, the_char)| the_char)
-                .collect();
-            new_str.into_bytes()
-        } else {
-            let mut new_vec = s.to_owned();
-            new_vec.remove(index);
-            new_vec
-        }
-    }
 
-    // Returns the first n characters up to len from a utf-8 string stored in a slice of bytes
-    // The "UNICODE_KEYS" path relies on the buffer being valid unicode
-    fn unicode_truncate(s: &[u8], len: usize) -> Vec<u8> {
-        if UNICODE_KEYS {
-            let the_str = unsafe{std::str::from_utf8_unchecked(s)};
-            let new_str : String = the_str.chars()
-                .enumerate()
-                .filter(|(i, _)| *i < len)
-                .map(|(_, the_char)| the_char)
-                .collect();
-            new_str.into_bytes()
-        } else {
-            if s.len() > len {
-                let (prefix, _remainder) = s.split_at(len);
-                prefix.to_owned()
-            } else {
-                s.to_owned()
-            }
-        }
-    }
+
+    //GOATGOAT, old implementation
+    // fn unicode_truncate(s: &str, len: usize) -> String {
+    //     if UNICODE_KEYS {
+    //         let the_str = unsafe{std::str::from_utf8_unchecked(s)};
+    //         let new_str : String = the_str.chars()
+    //             .enumerate()
+    //             .filter(|(i, _)| *i < len)
+    //             .map(|(_, the_char)| the_char)
+    //             .collect();
+    //         new_str.into_bytes()
+    //     } else {
+    //         if s.len() > len {
+    //             let (prefix, _remainder) = s.split_at(len);
+    //             prefix.to_owned()
+    //         } else {
+    //             s.to_owned()
+    //         }
+    //     }
+    // }
+
 
     /// Convenience function that returns the [edit_distance](Table::edit_distance) function associated with a Table
-    pub fn default_distance_func(&self) -> impl Fn(&[u8], &[u8]) -> u64 {
+    pub fn default_distance_func(&self) -> impl Fn(&[KeyCharT], &[KeyCharT]) -> u64 {
         Self::edit_distance
     }
 
@@ -1390,7 +1769,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// else a distance function is needed.
     /// 
     /// This implementation uses the Wagner-Fischer Algorithm, as it's described [here](https://en.wikipedia.org/wiki/Levenshtein_distance)
-    pub fn edit_distance(key_a : &[u8], key_b : &[u8]) -> u64 {
+    pub fn edit_distance(key_a : &[KeyCharT], key_b : &[KeyCharT]) -> u64 {
 
 //GOATGOATGOAT Early return from this function doubles performance... So half our time is in here even
 // though the flamegraph isn't showing that for some reason.
@@ -1400,8 +1779,8 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
 //1. Can I avoid zeroing the statically-allocated buffer d? (5% speedup)
 //2. pre-load keys into chars buffer to save call to unicode_char_at_index in loop (10% speedup)
 
-        let m = Self::unicode_len(key_a)+1;
-        let n = Self::unicode_len(key_b)+1;
+        let m = key_a.len()+1;
+        let n = key_b.len()+1;
 
         //Allocate a 2-dimensional vec for the distances between the first i characters of key_a
         //and the first j characters of key_b
@@ -1417,9 +1796,9 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
             *element = i as u8;
         }
 
-        //for j in 1..n {
-            //d[0][j] = j as u8;
-        //}
+        // for j in 1..n {
+        //     d[0][j] = j as u8;
+        // }
         for (j, element) in d[0].iter_mut().enumerate() {
             *element = j as u8;
         }
@@ -1433,7 +1812,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
                 // MAX_KEY_LENGTH x 2 buffer, and then alternate between writing the values in one line
                 // and reading them from the previous line.
 
-                let substitution_cost = if Self::unicode_char_at_index(key_a, i-1) == Self::unicode_char_at_index(key_b, j-1) {
+                let substitution_cost = if key_a[i-1] == key_b[j-1] {
                     0
                 } else {
                     1
@@ -1463,7 +1842,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     }
 }
 
-impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize>Table<ValueT, MAX_DELETES, MEANINGFUL_KEY_LEN, true> {
+impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize>Table<char, ValueT, MAX_DELETES, MEANINGFUL_KEY_LEN, true> {
 
     /// Inserts a new key-value pair into the table and returns the RecordID of the new record
     /// 
@@ -1473,8 +1852,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn insert(&mut self, key : &str, value : &ValueT) -> Result<RecordID, String> {
-        let keys_vec = vec![key.as_bytes()];
-        self.insert_internal(keys_vec.into_iter(), 1, value)
+        self.insert_internal([&key].iter().map(|key| *key), 1, value) //GOAT see if this works, otherwise use a vec like before
     }
 
     /// Retrieves a key-value pair using a RecordID
@@ -1503,10 +1881,8 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn create<K : Borrow<str>>(&mut self, keys : &[K], value : &ValueT) -> Result<RecordID, String> {
-        let num_keys = keys.len();
-        let keys_iter = keys.into_iter().map(|key| key.borrow().as_bytes());
-        self.insert_internal(keys_iter, num_keys, value)
+    pub fn create<'a, K : Key<'a, char>>(&mut self, keys : &'a [K], value : &ValueT) -> Result<RecordID, String> {
+        self.insert_internal(keys.into_iter(), keys.len(), value)
     }
 
     /// Adds the supplied keys to the record's keys
@@ -1515,9 +1891,15 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn add_keys<K : Borrow<str>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
-        self.add_keys_internal(record_id, keys.into_iter().map(|key| key.borrow().as_bytes()), keys.len())
+    pub fn add_keys<'a, K : Key<'a, char>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
+        self.add_keys_internal(record_id, keys.into_iter(), keys.len())
     }
+
+//GOATGOAT, Should I take a Key instead, for all of the above functions?????
+
+//GOATGOATGOAT, Need a test where I pass a Vec<char> as the key to a utf8 encoded key table
+// Need to test creating with utf-8 and finding using both exact and fuzzy, using a char vec
+// need to test creating with a char vec, and finding both exact and fuzzy, using a utf-8 string
 
     /// Removes the supplied keys from the keys associated with a record
     /// 
@@ -1529,8 +1911,8 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn remove_keys<K : Borrow<str>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
-        let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| key.borrow().as_bytes()));
+    pub fn remove_keys<'a, K : Key<'a, char>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
+        let keys_set : HashSet<&K> = HashSet::from_iter(keys.into_iter());
         self.remove_keys_internal(record_id, &keys_set)
     }
 
@@ -1540,9 +1922,9 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn replace_keys<K : Borrow<str>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
-        let keys_vec : Vec<&[u8]> = keys.into_iter().map(|key| key.borrow().as_bytes()).collect();
-        self.replace_keys_internal(record_id, &keys_vec[..])
+    pub fn replace_keys<'a, K : Key<'a, char>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
+        // let keys_vec : Vec<&str> = keys.into_iter().map(|key| key.borrow().as_bytes()).collect();GOAT
+        self.replace_keys_internal(record_id, keys)
     }
 
     /// Returns an iterator over all of the key associated with the specified record
@@ -1550,9 +1932,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn get_keys<'a>(&'a self, record_id : RecordID) -> Result<impl Iterator<Item=String> + 'a, String> {
-        Ok(self.get_keys_internal(record_id)?.map(|key| {
-            unsafe{ String::from_utf8_unchecked(key.to_vec()) }
-        }))
+        self.get_keys_internal(record_id)
     }
 
     /// Returns one key associated with the specified record.  If the record has more than one key
@@ -1569,15 +1949,15 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         // fall back to checking the rec_data entry if that failed.  Depends on whether we want the
         // last ounce of performance from this function or not.
         let first_key = self.get_keys_internal(record_id)?.next().unwrap();
-        Ok(unsafe{ String::from_utf8_unchecked(first_key.to_vec()) } )
+        Ok(first_key)
     }
 
     /// Locates all records in the table with keys that precisely match the key supplied
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_exact<'a>(&'a self, key : &'a str) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
-        self.lookup_exact_internal(key.as_bytes()).map(|result_vec| result_vec.into_iter())
+    pub fn lookup_exact(&self, key : &str) -> Result<impl Iterator<Item=RecordID>, String> {
+        self.lookup_exact_internal(&key).map(|result_vec| result_vec.into_iter())
     }
 
     /// Locates all records in the table with a key that is within a deletion distance of MAX_DELETES of
@@ -1587,8 +1967,9 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
+//GOATGOAT, see if I can remove these lifetimes
     pub fn lookup_fuzzy_raw<'a>(&'a self, key : &'a str) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
-        self.lookup_fuzzy_raw_internal(key.as_bytes())
+        self.lookup_fuzzy_raw_internal(&key)
     }
 
     /// Locates all records in the table for which the supplied `distance_function` evaluates to a result smaller
@@ -1596,8 +1977,9 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_fuzzy<'a, D : 'static + Copy + Zero + PartialOrd, F : 'a + Fn(&[u8], &[u8])->D>(&'a self, key : &'a str, distance_function : F, threshold : D) -> Result<impl Iterator<Item=(RecordID, D)> + 'a, String> {
-        self.lookup_fuzzy_internal(key.as_bytes(), distance_function, Some(threshold))
+//GOATGOAT, see if I can remove these lifetimes
+    pub fn lookup_fuzzy<'a, D : 'static + Copy + Zero + PartialOrd, F : 'a + Fn(&[char], &[char])->D>(&'a self, key : &'a str, distance_function : F, threshold : D) -> Result<impl Iterator<Item=(RecordID, D)> + 'a, String> {
+        self.lookup_fuzzy_internal(&key, distance_function, Some(threshold))
     }
 
     /// Locates the record in the table for which the supplied `distance_function` evaluates to the lowest value
@@ -1610,12 +1992,13 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_best<'a, D : 'static + Copy + Zero + PartialOrd, F : 'a + Fn(&[u8], &[u8])->D>(&'a self, key : &'a str, distance_function : F) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
-        self.lookup_best_internal(key.as_bytes(), distance_function)
+//GOATGOAT, see if I can remove these lifetimes
+    pub fn lookup_best<'a, D : 'static + Copy + Zero + PartialOrd, F : 'a + Fn(&[char], &[char])->D>(&'a self, key : &'a str, distance_function : F) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
+        self.lookup_best_internal(&key, distance_function)
     }
 }
 
-impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize>Table<ValueT, MAX_DELETES, MEANINGFUL_KEY_LEN, false> {
+impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned, ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize>Table<KeyCharT, ValueT, MAX_DELETES, MEANINGFUL_KEY_LEN, false> {
 
     /// Inserts a new key-value pair into the table and returns the RecordID of the new record
     /// 
@@ -1624,8 +2007,8 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn insert(&mut self, key : &[u8], value : &ValueT) -> Result<RecordID, String> {
-        let keys_vec = vec![key];
+    pub fn insert(&mut self, key : &[KeyCharT], value : &ValueT) -> Result<RecordID, String> {
+        let keys_vec = vec![&key];
         self.insert_internal(keys_vec.into_iter(), 1, value)
     }
 
@@ -1636,7 +2019,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn get(&self, record_id : RecordID) -> Result<(Vec<u8>, ValueT), String> {
+    pub fn get(&self, record_id : RecordID) -> Result<(Vec<KeyCharT>, ValueT), String> {
         let key = self.get_one_key(record_id)?;
         let value = self.get_value(record_id)?;
 
@@ -1655,9 +2038,9 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn create<K : Borrow<[u8]>>(&mut self, keys : &[K], value : &ValueT) -> Result<RecordID, String> {
+    pub fn create<'a, K : Key<'a, KeyCharT>>(&mut self, keys : &'a [K], value : &ValueT) -> Result<RecordID, String> {
         let num_keys = keys.len();
-        let keys_iter = keys.into_iter().map(|key| key.borrow());
+        let keys_iter = keys.into_iter();
         self.insert_internal(keys_iter, num_keys, value)
     }
 
@@ -1667,8 +2050,8 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn add_keys<K : Borrow<[u8]>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
-        self.add_keys_internal(record_id, keys.into_iter().map(|key| key.borrow()), keys.len())
+    pub fn add_keys<'a, K : Key<'a, KeyCharT>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
+        self.add_keys_internal(record_id, keys.into_iter(), keys.len())
     }
 
     /// Removes the supplied keys from the keys associated with a record
@@ -1681,8 +2064,8 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn remove_keys<K : Borrow<[u8]>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
-        let keys_set : HashSet<&[u8]> = HashSet::from_iter(keys.into_iter().map(|key| key.borrow()));
+    pub fn remove_keys<'a, K : Key<'a, KeyCharT>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
+        let keys_set : HashSet<&K> = HashSet::from_iter(keys.into_iter());
         self.remove_keys_internal(record_id, &keys_set)
     }
 
@@ -1692,7 +2075,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn replace_keys<K : Borrow<[u8]>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
+    pub fn replace_keys<'a, K : Key<'a, KeyCharT>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
         self.replace_keys_internal(record_id, keys)
     }
 
@@ -1700,7 +2083,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn get_keys<'a>(&'a self, record_id : RecordID) -> Result<impl Iterator<Item=Vec<u8>> + 'a, String> {
+    pub fn get_keys<'a>(&'a self, record_id : RecordID) -> Result<impl Iterator<Item=Vec<KeyCharT>> + 'a, String> {
         self.get_keys_internal(record_id)
     }
 
@@ -1709,7 +2092,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn get_one_key(&self, record_id : RecordID) -> Result<Vec<u8>, String> {
+    pub fn get_one_key(&self, record_id : RecordID) -> Result<Vec<KeyCharT>, String> {
         //TODO: Perhaps we can speed this up in the future by avoiding deserializing all keys
         Ok(self.get_keys_internal(record_id)?.next().unwrap())
     }
@@ -1718,8 +2101,9 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_exact<'a>(&'a self, key : &'a [u8]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
-        self.lookup_exact_internal(key).map(|result_vec| result_vec.into_iter())
+//GOATGOAT, see if I can remove these lifetimes
+    pub fn lookup_exact<'a>(&'a self, key : &'a [KeyCharT]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
+        self.lookup_exact_internal(&key).map(|result_vec| result_vec.into_iter())
     }
 
     /// Locates all records in the table with a key that is within a deletion distance of MAX_DELETES of
@@ -1729,8 +2113,9 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_fuzzy_raw<'a>(&'a self, key : &'a [u8]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
-        self.lookup_fuzzy_raw_internal(key)
+//GOATGOAT, see if I can remove these lifetimes
+    pub fn lookup_fuzzy_raw<'a>(&'a self, key : &'a [KeyCharT]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
+        self.lookup_fuzzy_raw_internal(&key)
     }
 
     /// Locates all records in the table for which the supplied `distance_function` evaluates to a result smaller
@@ -1738,8 +2123,9 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_fuzzy<'a, D : 'static + Copy + Zero + PartialOrd, F : 'a + Fn(&[u8], &[u8])->D>(&'a self, key : &'a [u8], distance_function : F, threshold : D) -> Result<impl Iterator<Item=(RecordID, D)> + 'a, String> {
-        self.lookup_fuzzy_internal(key, distance_function, Some(threshold))
+//GOATGOAT, see if I can remove these lifetimes
+    pub fn lookup_fuzzy<'a, D : 'static + Copy + Zero + PartialOrd, F : 'a + Fn(&[KeyCharT], &[KeyCharT])->D>(&'a self, key : &'a [KeyCharT], distance_function : F, threshold : D) -> Result<impl Iterator<Item=(RecordID, D)> + 'a, String> {
+        self.lookup_fuzzy_internal(&key, distance_function, Some(threshold))
     }
 
     /// Locates the record in the table for which the supplied `distance_function` evaluates to the lowest value
@@ -1752,12 +2138,13 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_best<'a, D : 'static + Copy + Zero + PartialOrd, F : 'a + Fn(&[u8], &[u8])->D>(&'a self, key : &'a [u8], distance_function : F) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
-        self.lookup_best_internal(key, distance_function)
+//GOATGOAT, see if I can remove these lifetimes
+    pub fn lookup_best<'a, D : 'static + Copy + Zero + PartialOrd, F : 'a + Fn(&[KeyCharT], &[KeyCharT])->D>(&'a self, key : &'a [KeyCharT], distance_function : F) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
+        self.lookup_best_internal(&key, distance_function)
     }
 }
 
-impl <ValueT : Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize, const UNICODE_KEYS : bool>Drop for Table<ValueT, MAX_DELETES, MEANINGFUL_KEY_LEN, UNICODE_KEYS> {
+impl <KeyCharT, ValueT, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize, const UNICODE_KEYS : bool>Drop for Table<KeyCharT, ValueT, MAX_DELETES, MEANINGFUL_KEY_LEN, UNICODE_KEYS> {
     fn drop(&mut self) {
         //Close down Rocks
         self.db.flush().unwrap();
@@ -1917,6 +2304,39 @@ fn bincode_u64_le_varint(buf : &[u8], num_bytes : &mut usize) -> u64 {
     }
 }
 
+//GOATGOATGOAT, move all these unicode helpers outside the Table impl block, and ultimately to another file
+
+// Returns the number of chars in a utf-8 string
+fn unicode_len(s: &str) -> usize {
+    s.chars().count()
+}
+
+/// Returns the first n characters up to len from a utf-8 string
+fn unicode_truncate(s: &str, len: usize) -> String {
+    let new_string : String = s.chars()
+        .enumerate()
+        .filter(|(i, _)| *i < len)
+        .map(|(_, the_char)| the_char)
+        .collect();
+    new_string
+}
+
+// Removes a single unicode character at the specified index from a utf-8 string stored
+fn unicode_remove_char(s: &str, idx: usize) -> String {
+    let new_str : String = s.chars()
+        .enumerate()
+        .filter(|(i, _)| *i != idx)
+        .map(|(_, the_char)| the_char)
+        .collect();
+    new_str
+}
+
+// Returns the unicode character at the idx, counting through each character in the string
+// Will panic if idx is greater than the number of characters in the parsed string
+fn unicode_char_at_index(s: &str, idx : usize) -> char {
+    s.chars().nth(idx).unwrap()
+}
+
 //TODO: Currently Unused.  Delete
 // /// Returns a slice representing the characters of a String that has been encoded with bincode, using
 // /// [VarintEncoding](bincode::config::VarintEncoding) and [LittleEndian](bincode::config::LittleEndian) byte order.
@@ -1964,7 +2384,7 @@ mod tests {
 
     
         //Create the FuzzyRocks Table, and clear out any records that happen to be hanging out
-        let mut table = Table::<i32, 2, 12, true>::new("geonames.rocks").unwrap();
+        let mut table = Table::<char, i32, 2, 12, true>::new("geonames.rocks").unwrap();
         table.reset().unwrap();
 
         //Data structure to parse the GeoNames TSV file into
@@ -2009,15 +2429,6 @@ mod tests {
             .double_quote(false)
             .from_reader(tsv_file_contents.as_bytes());
 
-        //A function we'll use to shorten names that exceed a limited number of characters
-        fn utf8_truncate(s : &str, len : usize) -> String {
-            s.chars()
-                .enumerate()
-                .filter(|(i, _)| *i < len)
-                .map(|(_, the_char)| the_char)
-                .collect()
-        }
-
         //Iterate over every geoname entry in the geonames file and insert it (lowercase) into our table
         let mut record_id = RecordID::NULL;
         let mut tsv_record_count = 0;
@@ -2031,7 +2442,7 @@ mod tests {
 
             //Create a record in the table
             let names_vec : Vec<String> = names.into_iter()
-                .map(|string| utf8_truncate(string.as_str(), MAX_KEY_LENGTH))
+                .map(|string| unicode_truncate(string.as_str(), MAX_KEY_LENGTH))
                 .collect();
             record_id = table.create(&names_vec[..], &geoname.geonameid).unwrap();
             tsv_record_count += 1;
@@ -2061,7 +2472,7 @@ mod tests {
         drop(london_results);
 
         //Reopen the table and confirm that "London" is still there
-        let table = Table::<i32, 2, 12, true>::new("geonames.rocks").unwrap();
+        let table = Table::<char, i32, 2, 12, true>::new("geonames.rocks").unwrap();
         let london_results : Vec<i32> = table.lookup_exact("london").unwrap().map(|record_id| table.get_value(record_id).unwrap()).collect();
         assert!(london_results.contains(&2643743)); //2643743 is the geonames_id of "London"
     }
@@ -2070,7 +2481,7 @@ mod tests {
     fn fuzzy_rocks_test() {
 
         //Create and reset the FuzzyRocks Table
-        let mut table = Table::<String, 2, 8, true>::new("test.rocks").unwrap();
+        let mut table = Table::<char, String, 2, 8, true>::new("test.rocks").unwrap();
         table.reset().unwrap();
 
         //Insert some records
@@ -2262,7 +2673,7 @@ mod tests {
     /// This test is tests some basic non-unicode key functionality.
     fn non_unicode_key_test() {
 
-        let mut table = Table::<f32, 1, 8, false>::new("test2.rocks").unwrap();
+        let mut table = Table::<u8, f32, 1, 8, false>::new("test2.rocks").unwrap();
         table.reset().unwrap();
 
         let one = table.insert(b"One", &1.0).unwrap();
@@ -2284,7 +2695,7 @@ mod tests {
     fn perf_counters_test() {
 
         //Initialize the table with a very big database
-        let table = Table::<i32, 2, 12, true>::new("all_cities.geonames.rocks").unwrap();
+        let table = Table::<char, i32, 2, 12, true>::new("all_cities.geonames.rocks").unwrap();
 
         //Make sure we have no pathological case of a variant for a zero-length string
         let iter = table.lookup_fuzzy_raw("").unwrap();
@@ -2328,7 +2739,7 @@ mod tests {
 //Features since last push to crates.io:
 // Multi-key support
 // lookup_best now returns an iterator instead of one arbitrarily-chosen record
-// ???(not yet) Support for a generic character type in key
+// Support for a generic character type in key
 // Adding micro-benchmarks using criterion
 // Massive Perf optimizations for lookups
 //  lookup_best checks lookup_exact first before more expensive lookup_fuzzy
@@ -2356,3 +2767,20 @@ mod tests {
 //GOATGOATGOAT, Do a separate test for a ValueT of size 0
 
 //GOATGOATGOAT, Clippy, and update documentation
+
+//GOATGOAT, Provide a convenience type alias for a table with utf8 keys
+
+//GOATGOAT Create a random keys lookup benchmark, where I generate a random key each time
+
+//GOATGOATGOAT, My plan is:
+// - variants remain u8 vecs.
+// - keys become KeyCharT vecs.
+//
+// In the process of finding the variants, I convert to bytes-buffers.
+// Otherwise, I try to keep it as a KeyCharT vec
+// serialize and deserialize both take KeyCharT vecs
+//      UTF8 flag is special, I have a serialize / deserialize function that has special behavior in that case
+//
+//
+// Let Wolf Garbe know about my crate when I publish FuzzyRocks v0.2
+
