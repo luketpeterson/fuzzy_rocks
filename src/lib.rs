@@ -157,7 +157,6 @@
 // The distance function should be part of the parameter block, and therefore part of the table
 
 use core::marker::PhantomData;
-//use core::borrow::Borrow; //GOAT
 use core::cmp::{min, Ordering};
 use core::hash::Hash;
 
@@ -424,7 +423,7 @@ impl <ValueT, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize>TableK
             num_chars = i;
         }
         unsafe{ buf.set_len(num_chars+1) };
-        
+
         buf
     }
 
@@ -481,28 +480,6 @@ pub trait KeyUnsafe<'a, KeyCharT> : Eq + Hash + Clone + Serialize {
     unsafe fn from_owned_unsafe<OwnedKeyT : OwnedKey<KeyCharT>>(owned_key : &OwnedKeyT) -> Self;
 }
 
-//GOATGOAT
-// impl <'a, KeyCharT, T>Key<'a, KeyCharT> for &'a T
-//     where
-//     T : Key<'a, KeyCharT>
-// {
-//     fn num_chars(&self) -> usize {
-//         self.num_chars()
-//     }
-
-// }
-
-// impl <'a, KeyCharT, T>KeyUnsafe<'a, KeyCharT> for &'a T
-//     where
-//     T : KeyUnsafe<'a, KeyCharT>
-// {
-//     //GOAT
-//     // unsafe fn from_owned_unsafe<OwnedKeyT : OwnedKey<KeyCharT>>(owned_key : &OwnedKeyT) -> Self {
-//     //     let result = owned_key.borrow_vec().unwrap();
-//     //     unsafe { transmute::<&[KeyCharT], &'a [KeyCharT]>(result) }    
-//     // }
-// }
-
 impl <'a, KeyCharT>Key<'a, KeyCharT> for &'a [KeyCharT]
     where
     KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned,
@@ -511,27 +488,19 @@ impl <'a, KeyCharT>Key<'a, KeyCharT> for &'a [KeyCharT]
         self.len()
     }
 
-    // fn as_bytes(&self) -> &[u8] {
-    //     slice::<KeyCharT>::as_bytes(self)
-    // }
-    //GOATGOAT, is this above possible???
     fn as_bytes(&self) -> &[u8] {
         let len = self.len();
         unsafe { slice::from_raw_parts(self.as_ptr() as *const u8, size_of::<KeyCharT>() * len) }
-        //GOAT, Ask "Is Copy bound enough to make this safe"
     }
 
-    // fn into_bytes(self) -> Vec<u8> {
-    //     slice::<KeyCharT>::into_bytes(self)
-    // }
-    //GOATGOAT, is the above possible?
     fn into_bytes(self) -> Vec<u8> {
 
         let mut owned_vec = self.to_vec();
+        let len = owned_vec.len();
+        let cap = owned_vec.capacity();
 
         //Now transmute the vec into a vec of bytes
-        let len = self.len();
-        let result = unsafe { Vec::<u8>::from_raw_parts(owned_vec.as_mut_ptr() as *mut u8, size_of::<KeyCharT>() * len, size_of::<KeyCharT>() * len) };
+        let result = unsafe { Vec::<u8>::from_raw_parts(owned_vec.as_mut_ptr() as *mut u8, size_of::<KeyCharT>() * len, size_of::<KeyCharT>() * cap) };
         forget(owned_vec); //So we don't get a double-free
         result
     }
@@ -571,24 +540,17 @@ impl <KeyCharT>Key<'_, KeyCharT> for Vec<KeyCharT>
         self.len()
     }
 
-    // fn as_bytes(&self) -> &[u8] {
-    //     self.as_bytes()
-    // }
-    //GOATGOAT, is the above possible?
     fn as_bytes(&self) -> &[u8] {
         let len = self.len();
         unsafe { slice::from_raw_parts(self.as_ptr() as *const u8, size_of::<KeyCharT>() * len) }
-        //GOAT, Ask "Is Copy bound enough to make this safe"
     }
 
-    // fn into_bytes(self) -> Vec<u8> {
-    //     self.into_bytes()
-    // }
-//GOATGOAT, is the above possible?
     fn into_bytes(self) -> Vec<u8> {
         let mut mut_self = self;
         let len = mut_self.len();
-        let result = unsafe { Vec::<u8>::from_raw_parts(mut_self.as_mut_ptr() as *mut u8, size_of::<KeyCharT>() * len, size_of::<KeyCharT>() * len) };
+        let cap = mut_self.capacity();
+
+        let result = unsafe { Vec::<u8>::from_raw_parts(mut_self.as_mut_ptr() as *mut u8, size_of::<KeyCharT>() * len, size_of::<KeyCharT>() * cap) };
         forget(mut_self); //So we don't get a double-free
 
         result
@@ -803,10 +765,6 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
             let keys_iter = self.get_keys_in_group(key_group)?;
             let mut variants = HashSet::new();
             for key in keys_iter {
-                //GOATGOAT DEAD
-                // let key_char_vec = Self::owned_key_into_vec(key);
-                // let key_variants = Self::variants(&key_char_vec[..]);
-
                 let key_variants = Self::variants(&key);
                 variants.extend(key_variants);
             }
@@ -975,7 +933,6 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
             //A. We have no overlap with any existing group, so we will create a new group for this key
             group_idx = groups.key_group_keys.len();
             let mut new_set = HashSet::with_capacity(1);
-            //new_set.insert(<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT::from(key)); //GOATGOATGOAT, this is what I want, not the line below
             new_set.insert(Self::owned_key_from_key(key));
             groups.key_group_keys.push(new_set);
             groups.key_group_variants.push(key_variants.clone());
@@ -1119,13 +1076,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     /// 
     /// If one of the specified keys is not associated with the record then that specified
     /// key will be ignored.
-//GOATGOATGOAT
-//fn remove_keys_internal(&mut self, record_id : RecordID, remove_keys : &HashSet<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>) -> Result<(), String> {
-    fn remove_keys_internal<'a, K : Key<'a, KeyCharT>>(&mut self, record_id : RecordID, remove_keys : &HashSet<&K>) -> Result<(), String>
-//GOATGOAT
-//        where K : Borrow<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>
-//        where <Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT : Borrow<K>
-    {
+    fn remove_keys_internal<'a, K : Key<'a, KeyCharT>>(&mut self, record_id : RecordID, remove_keys : &HashSet<&K>) -> Result<(), String> {
 
         //Get all of the existing groups
         let group_ids : Vec<KeyGroupID> = self.get_key_groups(record_id)?.collect();
@@ -1482,20 +1433,6 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
             return Err("key length exceeds MAX_KEY_LENGTH".to_string());
         }
 
-//GOATGOAT Should the meaningful key be an abstract key or should we have already converted this????????
-//Thinking:
-// 1. The meaningful key needs to be the same type as the key we pass into variants()
-// 2. variants() should output raw bytes Vec<u8>
-// 3. A UTF-8 encoded String is already in the raw bytes form
-// 4. Therefore meaningful_key_substring needs to both take and return an abstract key type.
-//
-//BUUUUUUUTTTTTTTTT....... How the fuck to I create one of those???  There has to be an underlying
-// concrete type.  And what should the len() function mean?  the number of characters, or the number
-// of bytes??????
-//
-// ANSWER: I think I've gotta use the OwnedKeyT
-//
-
         let meaningful_key = Self::meaningful_key_substring(lookup_key);
         let meaningful_noop = meaningful_key.num_chars() == lookup_key_len;
 
@@ -1768,36 +1705,6 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
 
 //GOATGOATGOAT change the name of "UNICODE_KEYS" to "UTF8_KEYS"
 
-//GOATGOATGOAT, Make a Char type associated with the table, that is a char if the UNICODE_KEYS is true and a u8 if its false
-// Then get rid of calls to unicode_char_at_index, and replace them with indexing into a buffer of those...
-// For starters, we'll just do this inside edit_distance()
-
-//GOATGOATGOAT, Write up next steps, to use a char type plumbed throughout, so the symspell algorithm can operate on
-// atoms that aren't u8.
-
-
-
-    //GOATGOAT, old implementation
-    // fn unicode_truncate(s: &str, len: usize) -> String {
-    //     if UNICODE_KEYS {
-    //         let the_str = unsafe{std::str::from_utf8_unchecked(s)};
-    //         let new_str : String = the_str.chars()
-    //             .enumerate()
-    //             .filter(|(i, _)| *i < len)
-    //             .map(|(_, the_char)| the_char)
-    //             .collect();
-    //         new_str.into_bytes()
-    //     } else {
-    //         if s.len() > len {
-    //             let (prefix, _remainder) = s.split_at(len);
-    //             prefix.to_owned()
-    //         } else {
-    //             s.to_owned()
-    //         }
-    //     }
-    // }
-
-
     /// Convenience function that returns the [edit_distance](Table::edit_distance) function associated with a Table
     pub fn default_distance_func(&self) -> impl Fn(&[KeyCharT], &[KeyCharT]) -> u64 {
         Self::edit_distance
@@ -1809,13 +1716,6 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     /// 
     /// This implementation uses the Wagner-Fischer Algorithm, as it's described [here](https://en.wikipedia.org/wiki/Levenshtein_distance)
     pub fn edit_distance(key_a : &[KeyCharT], key_b : &[KeyCharT]) -> u64 {
-
-//GOATGOATGOAT Early return from this function doubles performance... So half our time is in here even
-// though the flamegraph isn't showing that for some reason.
-
-//GOATGOAT Optimization Opportunities:
-//1. Can I avoid zeroing the statically-allocated buffer d? (5% speedup)
-//2. pre-load keys into chars buffer to save call to unicode_char_at_index in loop (10% speedup)
 
         let m = key_a.len()+1;
         let n = key_b.len()+1;
@@ -1890,7 +1790,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn insert(&mut self, key : &str, value : &ValueT) -> Result<RecordID, String> {
-        self.insert_internal([&key].iter().map(|key| *key), 1, value) //GOAT see if this works, otherwise use a vec like before
+        self.insert_internal([&key].iter().map(|key| *key), 1, value)
     }
 
     /// Retrieves a key-value pair using a RecordID
@@ -1961,7 +1861,6 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn replace_keys<'a, K : Key<'a, char>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
-        // let keys_vec : Vec<&str> = keys.into_iter().map(|key| key.borrow().as_bytes()).collect();GOAT
         self.replace_keys_internal(record_id, keys)
     }
 
@@ -2005,7 +1904,6 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-//GOATGOAT, see if I can remove these lifetimes
     pub fn lookup_fuzzy_raw<'a>(&'a self, key : &'a str) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
         self.lookup_fuzzy_raw_internal(&key)
     }
@@ -2015,7 +1913,6 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-//GOATGOAT, see if I can remove these lifetimes
     pub fn lookup_fuzzy<'a, D : 'static + Copy + Zero + PartialOrd, F : 'a + Fn(&[char], &[char])->D>(&'a self, key : &'a str, distance_function : F, threshold : D) -> Result<impl Iterator<Item=(RecordID, D)> + 'a, String> {
         self.lookup_fuzzy_internal(&key, distance_function, Some(threshold))
     }
@@ -2030,7 +1927,6 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-//GOATGOAT, see if I can remove these lifetimes
     pub fn lookup_best<'a, D : 'static + Copy + Zero + PartialOrd, F : 'a + Fn(&[char], &[char])->D>(&'a self, key : &'a str, distance_function : F) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
         self.lookup_best_internal(&key, distance_function)
     }
@@ -2139,7 +2035,6 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-//GOATGOAT, see if I can remove these lifetimes
     pub fn lookup_exact<'a>(&'a self, key : &'a [KeyCharT]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
         self.lookup_exact_internal(&key).map(|result_vec| result_vec.into_iter())
     }
@@ -2151,7 +2046,6 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-//GOATGOAT, see if I can remove these lifetimes
     pub fn lookup_fuzzy_raw<'a>(&'a self, key : &'a [KeyCharT]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
         self.lookup_fuzzy_raw_internal(&key)
     }
@@ -2161,7 +2055,6 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-//GOATGOAT, see if I can remove these lifetimes
     pub fn lookup_fuzzy<'a, D : 'static + Copy + Zero + PartialOrd, F : 'a + Fn(&[KeyCharT], &[KeyCharT])->D>(&'a self, key : &'a [KeyCharT], distance_function : F, threshold : D) -> Result<impl Iterator<Item=(RecordID, D)> + 'a, String> {
         self.lookup_fuzzy_internal(&key, distance_function, Some(threshold))
     }
@@ -2176,7 +2069,6 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-//GOATGOAT, see if I can remove these lifetimes
     pub fn lookup_best<'a, D : 'static + Copy + Zero + PartialOrd, F : 'a + Fn(&[KeyCharT], &[KeyCharT])->D>(&'a self, key : &'a [KeyCharT], distance_function : F) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
         self.lookup_best_internal(&key, distance_function)
     }
@@ -2810,15 +2702,5 @@ mod tests {
 
 //GOATGOAT Create a random keys lookup benchmark, where I generate a random key each time
 
-//GOATGOATGOAT, My plan is:
-// - variants remain u8 vecs.
-// - keys become KeyCharT vecs.
-//
-// In the process of finding the variants, I convert to bytes-buffers.
-// Otherwise, I try to keep it as a KeyCharT vec
-// serialize and deserialize both take KeyCharT vecs
-//      UTF8 flag is special, I have a serialize / deserialize function that has special behavior in that case
-//
-//
-// Let Wolf Garbe know about my crate when I publish FuzzyRocks v0.2
+//GOAT Let Wolf Garbe know about my crate when I publish FuzzyRocks v0.2
 
