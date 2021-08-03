@@ -387,6 +387,7 @@ pub trait TableKeyEncoding<KeyCharT> {
     type OwnedKeyT : OwnedKey<KeyCharT>;
 
     fn owned_key_into_vec(key : Self::OwnedKeyT) -> Vec<KeyCharT>;
+    fn owned_key_into_buf<'a>(key : &'a Self::OwnedKeyT, buf : &'a mut Vec<KeyCharT>) -> &'a Vec<KeyCharT>;
     fn owned_key_from_string(s : String) -> Self::OwnedKeyT;
     fn owned_key_from_vec(v : Vec<KeyCharT>) -> Self::OwnedKeyT;
     fn owned_key_from_key<'a, K : Key<'a, KeyCharT>>(k : &K) -> Self::OwnedKeyT;
@@ -396,8 +397,37 @@ impl <ValueT, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize>TableK
     type OwnedKeyT = String;
     
     fn owned_key_into_vec(key : Self::OwnedKeyT) -> Vec<char> {
-        key.chars().collect()
+        //NOTE: 15% of the performance on the fuzzy lookups was taken with this function before I
+        // started optimizing and utimately switched over to owned_key_into_buf. It appeared that
+        // the buffer was being reallocated for each additional char for the collect() implementation.
+
+        //NOTE: Old implementation
+        // key.chars().collect()
+
+        //NOTE: It appears that this implementation is twice as fast as the collect() implementation,
+        // but we're still losing 7% of overall perf allocating and freeing this Vec, so I'm switching
+        // to owned_key_into_buf().
+        let num_chars = key.num_chars();
+        let mut result_vec = Vec::with_capacity(num_chars);
+        for the_char in key.chars() {
+            result_vec.push(the_char);
+        }
+        result_vec
     }
+
+    fn owned_key_into_buf<'a>(key : &'a Self::OwnedKeyT, buf : &'a mut Vec<char>) -> &'a Vec<char> {
+
+        let mut num_chars = 0;
+        for (i, the_char) in key.chars().enumerate() {
+            let element = unsafe{ buf.get_unchecked_mut(i) };
+            *element = the_char;
+            num_chars = i;
+        }
+        unsafe{ buf.set_len(num_chars+1) };
+        
+        buf
+    }
+
     fn owned_key_from_string(s : String) -> Self::OwnedKeyT {
         s
     }
@@ -414,6 +444,11 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     fn owned_key_into_vec(key : Self::OwnedKeyT) -> Vec<KeyCharT> {
         key
     }
+
+    fn owned_key_into_buf<'a>(key : &'a Self::OwnedKeyT, _buf : &'a mut Vec<KeyCharT>) -> &'a Vec<KeyCharT> {
+        key
+    }
+
     fn owned_key_from_string(_s : String) -> Self::OwnedKeyT {
         panic!() //NOTE: Should never be called when the OwnedKeyT isn't a String
     }
@@ -1355,6 +1390,9 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
             &key_chars_vec[..]
         };
 
+        //pre-allocate the buffer we'll expand the key-chars into
+        let mut key_chars_buf : Vec<KeyCharT> = Vec::with_capacity(MAX_KEY_LENGTH);
+
         //Our visitor closure tests the key using the distance function and threshold
         let lookup_fuzzy_visitor_closure = |key_group_id : KeyGroupID| {
 
@@ -1366,10 +1404,11 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
 
                 //Check the record's keys with the distance function and find the smallest distance
                 let mut record_keys_iter = self.get_keys_in_group(key_group_id).unwrap().into_iter();
-                let record_key_chars = Self::owned_key_into_vec(record_keys_iter.next().unwrap()); //If we have a zero-element keys array, it's a bug elsewhere, so this unwrap should always succeed
+                let record_key = record_keys_iter.next().unwrap(); //If we have a zero-element keys array, it's a bug elsewhere, so this unwrap should always succeed
+                let record_key_chars = Self::owned_key_into_buf(&record_key, &mut key_chars_buf);
                 let mut smallest_distance = distance_function(&record_key_chars[..], &looup_key_chars[..]); 
                 for record_key in record_keys_iter {
-                    let record_key_chars = Self::owned_key_into_vec(record_key);
+                    let record_key_chars = Self::owned_key_into_buf(&record_key, &mut key_chars_buf);
                     let distance = distance_function(&record_key_chars, &looup_key_chars[..]);
                     if distance < smallest_distance {
                         smallest_distance = distance;
@@ -1773,7 +1812,6 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
 
 //GOATGOATGOAT Early return from this function doubles performance... So half our time is in here even
 // though the flamegraph isn't showing that for some reason.
-// return 2;
 
 //GOATGOAT Optimization Opportunities:
 //1. Can I avoid zeroing the statically-allocated buffer d? (5% speedup)
