@@ -176,6 +176,9 @@ use std::mem::{MaybeUninit, forget, size_of, transmute};
 
 use rocksdb::{DB, DBWithThreadMode, ColumnFamily, ColumnFamilyDescriptor, MergeOperands};
 
+mod unicode_string_helpers;
+use unicode_string_helpers::{*};
+
 /// A collection containing records that may be searched by `key`
 /// 
 /// -`MAX_DELETES` is the number of deletes to store in the database for variants created
@@ -2230,39 +2233,6 @@ fn bincode_u64_le_varint(buf : &[u8], num_bytes : &mut usize) -> u64 {
             buf[0] as u64
         }
     }
-}
-
-//GOATGOATGOAT, move all these unicode helpers outside the Table impl block, and ultimately to another file
-
-// Returns the number of chars in a utf-8 string
-fn unicode_len(s: &str) -> usize {
-    s.chars().count()
-}
-
-/// Returns the first n characters up to len from a utf-8 string
-fn unicode_truncate(s: &str, len: usize) -> String {
-    let new_string : String = s.chars()
-        .enumerate()
-        .filter(|(i, _)| *i < len)
-        .map(|(_, the_char)| the_char)
-        .collect();
-    new_string
-}
-
-// Removes a single unicode character at the specified index from a utf-8 string stored
-fn unicode_remove_char(s: &str, idx: usize) -> String {
-    let new_str : String = s.chars()
-        .enumerate()
-        .filter(|(i, _)| *i != idx)
-        .map(|(_, the_char)| the_char)
-        .collect();
-    new_str
-}
-
-// Returns the unicode character at the idx, counting through each character in the string
-// Will panic if idx is greater than the number of characters in the parsed string
-fn unicode_char_at_index(s: &str, idx : usize) -> char {
-    s.chars().nth(idx).unwrap()
 }
 
 //TODO: Currently Unused.  Delete
