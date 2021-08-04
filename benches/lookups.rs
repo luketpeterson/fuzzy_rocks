@@ -5,7 +5,8 @@ use fuzzy_rocks::{*};
 pub fn london_lookup_benchmark(c: &mut Criterion) {
 
     //Initialize the table with a very big database
-    let table = Table::<char, i32, 2, 12, true>::new("all_cities.geonames.rocks").unwrap();
+    let config = TableConfig::<char, u8, i32, true>::default();
+    let table = Table::new("all_cities.geonames.rocks", config).unwrap();
 
     c.bench_function("lookup_exact_london", |b| b.iter(|| black_box( {
         let iter = table.lookup_exact("london").unwrap();
@@ -34,21 +35,21 @@ pub fn london_lookup_benchmark(c: &mut Criterion) {
     })));
 
     c.bench_function("lookup_best_exact_london", |b| b.iter(|| black_box( {
-        let _iter = table.lookup_best("london", table.default_distance_func()).unwrap();
+        let _iter = table.lookup_best("london").unwrap();
     })));
 
     c.bench_function("lookup_best_inexact_london", |b| b.iter(|| black_box( {
-        let _iter = table.lookup_best("Rondon", table.default_distance_func()).unwrap();
+        let _iter = table.lookup_best("Rondon").unwrap();
     })));
     
     //Perform the same fuzzy lookup, but iterate over all of the results
     c.bench_function("lookup_fuzzy_all_london", |b| b.iter(|| black_box( {
-        let iter = table.lookup_fuzzy("london", table.default_distance_func(), 3).unwrap();
+        let iter = table.lookup_fuzzy("london", 3).unwrap();
         let _ = iter.count();
     })));
 
     c.bench_function("lookup_fuzzy_all_tokyo", |b| b.iter(|| black_box( {
-        let iter = table.lookup_fuzzy("tokyo", table.default_distance_func(), 3).unwrap();
+        let iter = table.lookup_fuzzy("tokyo", 3).unwrap();
         let _ = iter.count();
     })));
 

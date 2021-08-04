@@ -22,7 +22,7 @@
 //! use fuzzy_rocks::{*};
 //! 
 //! //Create and reset the FuzzyRocks Table
-//! let mut table = Table::<char, String, 2, 8, true>::new("test.rocks").unwrap();
+//! let mut table = Table::new("test.rocks", DEFAULT_UTF8_TABLE).unwrap();
 //! table.reset().unwrap();
 //!
 //! //Insert some records
@@ -32,13 +32,13 @@
 //! let mon = table.insert("Monday", &"Getsuyoubi".to_string()).unwrap();
 //! 
 //! //Try out lookup_best, to get the closest fuzzy match
-//! let result = table.lookup_best("Bonday", table.default_distance_func())
+//! let result = table.lookup_best("Bonday")
 //!     .unwrap().next().unwrap();
 //! assert_eq!(result, mon);
 //! 
 //! //Try out lookup_fuzzy, to get all matches and their distances
-//! let results : Vec<(RecordID, u64)> = table
-//!     .lookup_fuzzy("Tuesday", table.default_distance_func(), 2)
+//! let results : Vec<(RecordID, u8)> = table
+//!     .lookup_fuzzy("Tuesday", 2)
 //!     .unwrap().collect();
 //! assert_eq!(results.len(), 2);
 //! assert!(results.contains(&(tue, 0))); //Tuesday -> Tuesday with 0 edits
@@ -74,13 +74,13 @@
 //! be used as keys.
 //! 
 //! Any distance function you choose must be compatible with SymSpell's delete-distance optimization.  In other
-//! words, you must be able to delete no more than `MAX_DELETES` characters from each of the record's
+//! words, you must be able to delete no more than [config.max_deletes] characters from each of the record's
 //! key and the lookup key and arrive at identical key-variants.  If your distance function is incompatible
 //! with this property then the SymSpell optimization won't work for you and you should use a different fuzzy
 //! lookup technique and a different crate.
 //! 
 //! Distance functions may return any scalar type, so floating point distances will work.  However, the
-//! `MAX_DELETES` constant is an integer.  Records that can't be reached by deleting `MAX_DELETES` characters
+//! [config.max_deletes] constant is an integer.  Records that can't be reached by deleting `config.max_deletes` characters
 //! from both the record key and the lookup key will never be evaluated by the distance function and are
 //! conceptually "too far away".  Once the distance function has been evaluated, its return value is
 //! considered the authoritative distance and the delete distance is irrelevant.
@@ -105,7 +105,7 @@
 //! The fuzzy_rocks implementation has a few additional details to be aware of:
 //! 
 //! - fuzzy_rocks won't find keys that don't have at least one character in common, regardless of the value
-//! of `MAX_DELETES`.  For example the key `me` won't be found by the query string `hi`, even with a distance
+//! of `config.max_deletes`.  For example the key `me` won't be found by the query string `hi`, even with a distance
 //! of 2 (or any other value).  This decision was made because the variant space becomes very crowded
 //! for short keys, and the extreme example of the empty-string variant was severely damaging performance with
 //! short keys.
@@ -128,9 +128,9 @@
 //! 
 //! GOATGOATGOAT, Write-up on benchmarks.  How to edit, how to run.
 //! 
-//! A smaller `MAX_DELETES` value will perform better but be able to find fewer results for a search.
+//! A smaller `config.max_deletes` value will perform better but be able to find fewer results for a search.
 //! 
-//! A higher value for `MEANINGFUL_KEY_LEN` will result in fewer wasted evaluations of the distance function
+//! A higher value for `config.meaningful_key_len` will result in fewer wasted evaluations of the distance function
 //! but will lead to more entries in the variants database and thus more memory pressure.
 //! 
 //! If your use-case can cope with a higher startup latency and you are ok with all of your keys and
@@ -150,7 +150,12 @@
 // 0.) DNA snippet example.  Look at FAStA Wikipedia article
 // 1.) How SymSpell works best with sparse key spaces, but a BK-Tree is better for dense key spaces
 // 2.) How we have "Future Work" to add a BK tree to search within a key group
-//      consider adding a "k-nn query", in addition to or instead of the "best" query
+//      *consider adding a "k-nn query", in addition to or instead of the "best" query
+//      *Tools to detect when a parameter is tuned badly for a data set, based on known optimal
+//      ratios for certain performance counters.  Alternatively, tools to assist in performing a
+//      config-parameter optimization process, to tune a table config to a data set.
+//      *Save the Table config to the database (and the checksum of the distance function) to
+//      detect an error when the config changes in a way that makes the database invalid
 
 //GOATGOATGOAT
 //Create a parameter block for generic initialization.
@@ -184,36 +189,17 @@ use bincode_helpers::{*};
 
 /// A collection containing records that may be searched by `key`
 /// 
-/// -`MAX_DELETES` is the number of deletes to store in the database for variants created
-/// by the SymSpell optimization.  If `MAX_DELETES` is too small, the variant will not be found
-/// and therefore the `distance_function` will not have an opportunity to evaluate the match.  However,
-/// if `MAX_DELETES` is too large, it will hurt performance by evaluating too many candidates.
 /// 
-/// Empirically, values near 2 seem to be good in most situations I have found.  I.e. 1 and 3 might be
-/// appropriate sometimes.  4 ends up exploding in most cases I've seen so the SymSpell logic may not
-/// be a good fit if you need to find keys 4 edits away.  0 edits is an exact match.
-/// 
-/// -`MEANINGFUL_KEY_LEN` is an optimization where only a subset of the key is used for creating
-/// variants.  So, if `MEANINGFUL_KEY_LEN = 10` then only the first 10 characters of the key will be used
-/// to generate and search for variants.
-/// 
-/// This optimization is predicated on the idea that long key strings will not be very similar to each
-/// other.  For example the key *incomprehensibilities* will cause variants to be generated for
-///  *incomprehe*, meaning that a search for *incomprehension* would find *incomprehensibilities*
-///  and evauate it with the `distance_function` even though it is further than `MAX_DELETES`.
-/// 
-/// In a dataset where many keys share a common prefix, or where keys are organized into a namespace by
-/// concatenating strings, this optimization will cause problems and you should either pass a high number
-/// to effectively disable it, or rework this code to use different logic to select the substring
 /// 
 /// -`UTF8_KEYS` specifies whether the keys are UTF-8 encoded strings or not.  UFT-8 awareness is
 /// required to avoid deleting partial characters thus rendering the string invalid.  This comes at a
 /// performance cost, however, so passing `false` is more efficient if you plan to use regular ascii or
 /// any other kind of data as the table's keys.
 /// 
-pub struct Table<KeyCharT, ValueT, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize, const UTF8_KEYS : bool> {
+pub struct Table<KeyCharT, DistanceT, ValueT, const UTF8_KEYS : bool> {
     record_count : usize,
     db : DBWithThreadMode<rocksdb::SingleThreaded>,
+    config : TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>,
     path : String,
     deleted_records : Vec<RecordID>, //NOTE: Currently we don't try to hold onto deleted records across unloads, but we may change this in the future.
     #[cfg(feature = "perf_counters")]
@@ -221,6 +207,146 @@ pub struct Table<KeyCharT, ValueT, const MAX_DELETES : usize, const MEANINGFUL_K
     phantom_key: PhantomData<KeyCharT>,
     phantom_value: PhantomData<ValueT>,
 }
+
+// NOTE: The #![feature(const_generics)] feature isn't stabilized and I don't want to depend on
+// any unstable features.  So instead of taking the config structure as a const parameter to
+// Table, the compile-time arguments will be passed individually using the capabilities of
+// #![feature(min_const_generics)], and I'll hide that from novice API users by allowing the
+// compiler to infer the values from phantoms in the config structure.
+
+#[derive(Clone)]
+pub struct TableConfig<KeyCharT, DistanceT, ValueT, const UTF8_KEYS : bool> {
+
+    /// The number of deletes to store in the database for variants created
+    /// by the SymSpell optimization.  If `max_deletes` is too small, the variant will not be found
+    /// and therefore the `distance_function` will not have an opportunity to evaluate the match.  However,
+    /// if `max_deletes` is too large, it will hurt performance by evaluating too many candidates.
+    /// 
+    /// Empirically, values near 2 seem to be good in most situations I have found.  I.e. 1 and 3 might be
+    /// appropriate sometimes.  4 ends up exploding in most cases I've seen so the SymSpell logic may not
+    /// be a good fit if you need to find keys 4 edits away.  0 edits is an exact match.
+    pub max_deletes : usize,
+
+    /// This controls an optimization where only a subset of the key is used for creating
+    /// variants.  For example, if `meaningful_key_len = 10` then only the first 10 characters of the key will be used
+    /// to generate and search for variants.
+    /// 
+    /// This optimization is predicated on the idea that long key strings will not be very similar to each
+    /// other, and a certain number of characters is sufficient to substantially narrow down the search.
+    /// 
+    /// For example the key *incomprehensibilities* will cause variants to be generated for *incomprehe*
+    /// with a `meaningful_key_len` of 10, meaning that a search for *incomprehension* would find *incomprehensibilities*
+    /// and evauate it with the `distance_function` even though it is further than [config.max_deletes].
+    /// 
+    /// In a dataset where many keys share a common prefix, or where keys are organized into a namespace by
+    /// concatenating strings, this optimization will cause problems and you should either pass a high number
+    /// to effectively disable it, or rework this code to use different logic to select the substring
+    /// 
+    /// Lookup functions that invoke the distance function will always use the entire key, regardless of the
+    /// value of `meaningful_key_len`.
+    pub meaningful_key_len : usize,
+
+    /// The number of variants a key must share with a keys in an existing key group in order for that key to
+    /// be added to the group rather than being placed into a new separate key group.
+    /// 
+    /// NOTE: We arrived at the default value (5) empirically by testing a number of different values and
+    /// observing the effects on lookup speed, DB construction speed, and DB size.  The observed data
+    /// points are checked in, in the file: `misc/perf_data.txt`
+    pub group_variant_overlap_threshold : usize,
+    pub distance_function : fn(key_a : &[KeyCharT], key_b : &[KeyCharT]) -> DistanceT,
+    phantom_key: PhantomData<KeyCharT>,
+    phantom_distance: PhantomData<DistanceT>,
+    phantom_value: PhantomData<ValueT>,
+}
+
+impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned, DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, ValueT, const UTF8_KEYS : bool>TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS> {
+
+    pub fn default() -> Self {
+        Self {
+            max_deletes : 2,
+            meaningful_key_len : 12,
+            group_variant_overlap_threshold : 5,
+            distance_function : Self::edit_distance,
+            phantom_key : PhantomData,
+            phantom_distance : PhantomData,
+            phantom_value : PhantomData,        
+        }
+    }
+
+    /// An implementation of the basic Levenstein distance function, which may be passed to
+    /// [lookup_fuzzy](Table::lookup_fuzzy), [lookup_best](Table::lookup_best), or used anywhere
+    /// else a distance function is needed.
+    /// 
+    /// This implementation uses the Wagner-Fischer Algorithm, as it's described [here](https://en.wikipedia.org/wiki/Levenshtein_distance)
+    pub fn edit_distance(key_a : &[KeyCharT], key_b : &[KeyCharT]) -> DistanceT {
+
+        let m = key_a.len()+1;
+        let n = key_b.len()+1;
+
+        //Allocate a 2-dimensional vec for the distances between the first i characters of key_a
+        //and the first j characters of key_b
+        let mut d : [[u8; MAX_KEY_LENGTH + 1]; MAX_KEY_LENGTH + 1] = unsafe { MaybeUninit::uninit().assume_init() };
+
+        //NOTE: I personally find this (below) more readable, but clippy really like the other style.  -\_(..)_/-
+        // for i in 1..m {
+        //     d[i][0] = i;
+        // }
+        for (i, row) in d.iter_mut().enumerate().skip(1) {
+            //row[0] = i as u8;
+            let element = unsafe{ row.get_unchecked_mut(0) };
+            *element = i as u8;
+        }
+
+        // for j in 1..n {
+        //     d[0][j] = j as u8;
+        // }
+        for (j, element) in d[0].iter_mut().enumerate() {
+            *element = j as u8;
+        }
+
+        for j in 1..n {
+            for i in 1..m {
+
+                //TODO: There is one potential optimization left.  There is no reason to allcate a whole
+                // square buffer of MAX_KEY_LENGTH on a side, because we never look back before the previous
+                // line in the buffer.  A more cache-friendly approach might be to allocate a
+                // MAX_KEY_LENGTH x 2 buffer, and then alternate between writing the values in one line
+                // and reading them from the previous line.
+
+                let substitution_cost = if key_a[i-1] == key_b[j-1] {
+                    0
+                } else {
+                    1
+                };
+
+                //let deletion_distance = d[i-1][j] + 1;
+                let deletion_distance = unsafe {d.get_unchecked(i-1).get_unchecked(j)} + 1;
+                //let insertion_distance = d[i][j-1] + 1;
+                let insertion_distance = unsafe {d.get_unchecked(i).get_unchecked(j-1)} + 1;
+                //let substitution_distance = d[i-1][j-1] + substitution_cost;
+                let substitution_distance = unsafe {d.get_unchecked(i-1).get_unchecked(j-1)} + substitution_cost;
+
+                let smallest_distance = min(min(deletion_distance, insertion_distance), substitution_distance);
+                
+                //d[i][j] = smallest_distance;  
+                let element = unsafe{ d.get_unchecked_mut(i).get_unchecked_mut(j) };
+                *element = smallest_distance;
+            }
+        }
+
+        DistanceT::from(d[m-1][n-1])
+    }
+}
+
+pub const DEFAULT_UTF8_TABLE : TableConfig<char, u8, String, true> = TableConfig {
+    max_deletes : 2,
+    meaningful_key_len : 12,
+    group_variant_overlap_threshold : 5,
+    distance_function : TableConfig::<char, u8, String, true>::edit_distance,
+    phantom_key : PhantomData,
+    phantom_distance : PhantomData,
+    phantom_value : PhantomData,
+};
 
 /// Performance counters for optimizing [Table] parameters.
 /// 
@@ -330,14 +456,6 @@ impl <OwnedKeyT>KeyGroups<OwnedKeyT> {
     }
 }
 
-/// The number of variants a key must share with an existing key group in order for that key to
-/// be added to the group rather than forming a separate key group.
-/// 
-/// NOTE: We arrived at the value (5) empirically by testing a number of different values and
-/// observing the effects on lookup speed, DB construction speed, and DB size.  The observed data
-/// points are checked in, in the file: misc/perf_data.txt
-const VARIANT_OVERLAP_GROUP_THRESHOLD : usize = 5;
-
 /// The maximum number of characters allowable in a key.  Longer keys will cause an error
 pub const MAX_KEY_LENGTH : usize = 95;
 
@@ -398,7 +516,7 @@ pub trait TableKeyEncoding<KeyCharT> {
     fn owned_key_from_key<'a, K : Key<'a, KeyCharT>>(k : &K) -> Self::OwnedKeyT;
 }
 
-impl <ValueT, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize>TableKeyEncoding<char> for Table<char, ValueT, MAX_DELETES, MEANINGFUL_KEY_LEN, true> {
+impl <DistanceT, ValueT>TableKeyEncoding<char> for Table<char, DistanceT, ValueT, true> {
     type OwnedKeyT = String;
     
     fn owned_key_into_vec(key : Self::OwnedKeyT) -> Vec<char> {
@@ -443,7 +561,7 @@ impl <ValueT, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize>TableK
         k.borrow_key_str().unwrap().to_string() //NOTE: the unwrap() will panic if called with the wrong kind of key
     }
 }
-impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned, ValueT, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize>TableKeyEncoding<KeyCharT> for Table<KeyCharT, ValueT, MAX_DELETES, MEANINGFUL_KEY_LEN, false> {
+impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned, DistanceT, ValueT>TableKeyEncoding<KeyCharT> for Table<KeyCharT, DistanceT, ValueT, false> {
     type OwnedKeyT = Vec<KeyCharT>;
     
     fn owned_key_into_vec(key : Self::OwnedKeyT) -> Vec<KeyCharT> {
@@ -670,7 +788,7 @@ impl KeyUnsafe<'_, char> for String {
 }
 
 /// The implementation of the shared parts of Table
-impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::DeserializeOwned, ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize, const UTF8_KEYS : bool>Table<KeyCharT, ValueT, MAX_DELETES, MEANINGFUL_KEY_LEN, UTF8_KEYS>
+impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::DeserializeOwned, DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, ValueT : 'static + Serialize + serde::de::DeserializeOwned, const UTF8_KEYS : bool>Table<KeyCharT, DistanceT, ValueT, UTF8_KEYS>
     where Self : TableKeyEncoding<KeyCharT> {
 
     /// Creates a new Table, backed by the database at the path provided
@@ -681,7 +799,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn new(path : &str) -> Result<Self, String> {
+    pub fn new(path : &str, config : TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>) -> Result<Self, String> {
 
         //Configure the "keys" and "values" column families
         let keys_cf = ColumnFamilyDescriptor::new(KEYS_CF_NAME, rocksdb::Options::default());
@@ -708,6 +826,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
 
         Ok(Self {
             record_count,
+            config : config,
             db,
             path : path.to_string(),
             deleted_records : vec![],
@@ -771,7 +890,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
             let keys_iter = self.get_keys_in_group(key_group)?;
             let mut variants = HashSet::new();
             for key in keys_iter {
-                let key_variants = Self::variants(&key);
+                let key_variants = self.variants(&key);
                 variants.extend(key_variants);
             }
 
@@ -854,7 +973,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     fn put_record_keys<'a, K : Key<'a, KeyCharT> + 'a, KeysIterT : Iterator<Item=&'a K>>(&mut self, record_id : RecordID, keys_iter : KeysIterT, num_keys : usize) -> Result<(), String> {
     
         //Make groups for the keys
-        let groups = Self::make_groups_from_keys(keys_iter, num_keys).unwrap();
+        let groups = self.make_groups_from_keys(keys_iter, num_keys).unwrap();
         let num_groups = groups.key_group_keys.len();
 
         //Put the variants for each group into the right table
@@ -878,7 +997,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     /// 
     /// This function is the owner of the decision whether or not to add a key to an existing
     /// group or to create a new group for a key
-    fn add_key_to_groups<'a, K : Key<'a, KeyCharT>>(key : &K, groups : &mut KeyGroups<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>, update_reverse_map : bool) -> Result<(), String> {
+    fn add_key_to_groups<'a, K : Key<'a, KeyCharT>>(&self, key : &K, groups : &mut KeyGroups<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>, update_reverse_map : bool) -> Result<(), String> {
         
         //Make sure the key is within the maximum allowable MAX_KEY_LENGTH
         if key.num_chars() > MAX_KEY_LENGTH {
@@ -886,7 +1005,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
         }
 
         //Compute the variants for the key
-        let key_variants = Self::variants(key);
+        let key_variants = self.variants(key);
 
         //Variables that determine which group we merge into, or whether we create a new key group
         let mut group_idx; //The index of the key group we'll merge this key into
@@ -899,7 +1018,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
             create_new_group = false;
         } else {
 
-            if VARIANT_OVERLAP_GROUP_THRESHOLD > 0 {
+            if self.config.group_variant_overlap_threshold > 0 {
 
                 //Count the number of overlapping variants the key has with each existing group
                 // NOTE: It's possible the variant_reverse_lookup_map doesn't capture all of the
@@ -924,7 +1043,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
                 .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(Ordering::Equal))
                 .unwrap_or((0, 0));
                 group_idx = max_group_idx;
-                create_new_group = max_overlaps < VARIANT_OVERLAP_GROUP_THRESHOLD; //Unless we have at least VARIANT_OVERLAP_GROUP_THRESHOLD variant overlaps we'll make a new key group.
+                create_new_group = max_overlaps < self.config.group_variant_overlap_threshold; //Unless we have at least group_variant_overlap_threshold variant overlaps we'll make a new key group.
 
             } else {
                 group_idx = 0;
@@ -965,13 +1084,13 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     /// Divides a list of keys up into one or more key groups based on some criteria; the primary
     /// of which is the overlap between key variants.  Keys with more overlapping variants are more
     /// likely to belong in the same group and keys with fewer or none are less likely.
-    fn make_groups_from_keys<'a, K : Key<'a, KeyCharT> + 'a, KeysIterT : Iterator<Item=&'a K>>(keys_iter : KeysIterT, num_keys : usize) -> Result<KeyGroups<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>, String> {
+    fn make_groups_from_keys<'a, K : Key<'a, KeyCharT> + 'a, KeysIterT : Iterator<Item=&'a K>>(&self, keys_iter : KeysIterT, num_keys : usize) -> Result<KeyGroups<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>, String> {
 
         //Start with empty key groups, and add the keys one at a time
         let mut groups = KeyGroups::new();
         for (key_idx, key) in keys_iter.enumerate() {
             let update_reverse_map = key_idx < num_keys-1;
-            Self::add_key_to_groups(key, &mut groups, update_reverse_map)?;
+            self.add_key_to_groups(key, &mut groups, update_reverse_map)?;
         }
 
         Ok(groups)
@@ -995,7 +1114,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
             for key in self.get_keys_in_group(key_group)? {
 
                 //Compute the variants for the key, and merge them into the group variants
-                let key_variants = Self::variants(&key);
+                let key_variants = self.variants(&key);
 
                 //Update the reverse_lookup_map with every variant
                 for variant in key_variants.iter() {
@@ -1046,7 +1165,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
         // the correct group or create a new group
         for (key_idx, key) in keys_iter.enumerate() {
             let update_reverse_index = key_idx < num_keys-1;
-            Self::add_key_to_groups(key, &mut groups, update_reverse_index)?;
+            self.add_key_to_groups(key, &mut groups, update_reverse_index)?;
         }
 
         //Go over each group, work out the variants we need to add, then add them and update the group
@@ -1136,14 +1255,14 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
             //Compute all variants for the keys we're removing from this group
             let mut remove_keys_variants = HashSet::new();
             for remove_key in deleted_group_keys_sets[idx].iter() {
-                let keys_variants = Self::variants(remove_key);
+                let keys_variants = self.variants(remove_key);
                 remove_keys_variants.extend(keys_variants);
             }
 
             //Compute all the variants for the keys that must remain in the group
             let mut remaining_keys_variants = HashSet::new();
             for remaining_key in remaining_group_keys_sets[idx].iter() {
-                let keys_variants = Self::variants(remaining_key);
+                let keys_variants = self.variants(remaining_key);
                 remaining_keys_variants.extend(keys_variants);
             }
 
@@ -1262,7 +1381,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
         Ok(new_record_id)
     }
 
-    /// Visits all possible candidate keys for a given fuzzy search key, based on MAX_DELETES,
+    /// Visits all possible candidate keys for a given fuzzy search key, based on config.max_deletes,
     /// and invokes the supplied closure for each candidate KeyGroup found.
     /// 
     /// NOTE: The same group may be found via multiple variants.  It is the responsibility of
@@ -1276,7 +1395,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
         }
 
         //Create all of the potential variants based off of the "meaningful" part of the key
-        let variants = Self::variants(key);
+        let variants = self.variants(key);
 
         //Check to see if we have entries in the "variants" database for any of the key variants
         let variants_cf_handle = self.db.cf_handle(VARIANTS_CF_NAME).unwrap();
@@ -1331,7 +1450,9 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     /// It would be necessary to evaluate every key group for a particular record before returning the
     /// record.  The decision not to do this is on account of the fact that [lookup_fuzzy_raw_internal]
     /// could be used instead if the caller wants a quick-to-return iterator.
-    fn lookup_fuzzy_internal<'a, K : Key<'a, KeyCharT>, D : 'static + Copy + Zero + PartialOrd, F : Fn(&[KeyCharT], &[KeyCharT])->D>(&self, key : &K, distance_function : F, threshold : Option<D>) -> Result<impl Iterator<Item=(RecordID, D)>, String> {
+    fn lookup_fuzzy_internal<'a, K : Key<'a, KeyCharT>>(&self, key : &K, threshold : Option<DistanceT>) -> Result<impl Iterator<Item=(RecordID, DistanceT)>, String> {
+
+        let distance_function = self.config.distance_function;
 
         //Create a new HashMap to hold all of the RecordIDs that we might want to return, and the lowest
         // distance we find for that particular record
@@ -1396,7 +1517,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
         Ok(result_map.into_iter())
     }
 
-    fn lookup_best_internal<'a, K : Key<'a, KeyCharT>, D : 'static + Copy + Zero + PartialOrd, F : Fn(&[KeyCharT], &[KeyCharT])->D>(&self, key : &K, distance_function : F) -> Result<impl Iterator<Item=RecordID>, String> {
+    fn lookup_best_internal<'a, K : Key<'a, KeyCharT>>(&self, key : &K) -> Result<impl Iterator<Item=RecordID>, String> {
 
         //First, we should check to see if lookup_exact gives us what we want.  Because if it does,
         // it's muuuuuuch faster.  If we have an exact result, no other key will be a better match
@@ -1407,7 +1528,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
         
         //Assuming lookup_exact didn't work, we'll need to perform the whole fuzzy lookup and iterate each key
         //to figure out the closest distance
-        let mut result_iter = self.lookup_fuzzy_internal(key, distance_function, None)?;
+        let mut result_iter = self.lookup_fuzzy_internal(key, None)?;
         
         if let Some(first_result) = result_iter.next() {
             let mut best_distance = first_result.1;
@@ -1439,7 +1560,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
             return Err("key length exceeds MAX_KEY_LENGTH".to_string());
         }
 
-        let meaningful_key = Self::meaningful_key_substring(lookup_key);
+        let meaningful_key = self.meaningful_key_substring(lookup_key);
         let meaningful_noop = meaningful_key.num_chars() == lookup_key_len;
 
         //Get the variant for our meaningful_key
@@ -1638,13 +1759,13 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     }
 
     // Returns the "meaningful" part of a key, that is used as the starting point to generate the variants
-    fn meaningful_key_substring<'a, K : Key<'a, KeyCharT>>(key: &K) -> <Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT {
+    fn meaningful_key_substring<'a, K : Key<'a, KeyCharT>>(&self, key: &K) -> <Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT {
         if UTF8_KEYS {
-            let result_string = unicode_truncate(key.borrow_key_str().unwrap(), MEANINGFUL_KEY_LEN);
+            let result_string = unicode_truncate(key.borrow_key_str().unwrap(), self.config.meaningful_key_len);
             Self::owned_key_from_string(result_string)
         } else {
-            let result_vec = if key.num_chars() > MEANINGFUL_KEY_LEN {
-                let (prefix, _remainder) = key.borrow_key_chars().unwrap().split_at(MEANINGFUL_KEY_LEN);
+            let result_vec = if key.num_chars() > self.config.meaningful_key_len {
+                let (prefix, _remainder) = key.borrow_key_chars().unwrap().split_at(self.config.meaningful_key_len);
                 prefix.to_vec()
             } else {
                 key.get_key_chars()
@@ -1667,7 +1788,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     }
 
     /// Returns all of the variants of a key, for querying or adding to the variants database
-    fn variants<'a, K : Key<'a, KeyCharT>>(key: &K) -> HashSet<Vec<u8>> {
+    fn variants<'a, K : Key<'a, KeyCharT>>(&self, key: &K) -> HashSet<Vec<u8>> {
 
         let mut variants_set : HashSet<Vec<u8>> = HashSet::new();
         
@@ -1675,10 +1796,10 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
         if key.num_chars() > 0 {
 
             //We'll only build variants from the meaningful portion of the key
-            let meaningful_key = Self::meaningful_key_substring(key);
+            let meaningful_key = self.meaningful_key_substring(key);
 
-            if 0 < MAX_DELETES {
-                Self::variants_recursive(&meaningful_key, 0, &mut variants_set);
+            if 0 < self.config.max_deletes {
+                self.variants_recursive(&meaningful_key, 0, &mut variants_set);
             }
             variants_set.insert(meaningful_key.into_bytes());    
         }
@@ -1687,7 +1808,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     }
     
     // The recursive part of the variants() function
-    fn variants_recursive<'a, K : Key<'a, KeyCharT>>(key: &K, edit_distance: usize, variants_set: &mut HashSet<Vec<u8>>) {
+    fn variants_recursive<'a, K : Key<'a, KeyCharT>>(&self, key: &K, edit_distance: usize, variants_set: &mut HashSet<Vec<u8>>) {
     
         let edit_distance = edit_distance + 1;
     
@@ -1699,8 +1820,8 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     
                 if !variants_set.contains(variant.as_bytes()) {
     
-                    if edit_distance < MAX_DELETES {
-                        Self::variants_recursive(&variant, edit_distance, variants_set);
+                    if edit_distance < self.config.max_deletes {
+                        self.variants_recursive(&variant, edit_distance, variants_set);
                     }
     
                     variants_set.insert(variant.into_bytes());
@@ -1709,82 +1830,13 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
         }
     }
 
-    /// Convenience function that returns the [edit_distance](Table::edit_distance) function associated with a Table
-    pub fn default_distance_func(&self) -> impl Fn(&[KeyCharT], &[KeyCharT]) -> u64 {
-        Self::edit_distance
-    }
-
-    /// An implementation of the basic Levenstein distance function, which may be passed to
-    /// [lookup_fuzzy](Table::lookup_fuzzy), [lookup_best](Table::lookup_best), or used anywhere
-    /// else a distance function is needed.
-    /// 
-    /// This implementation uses the Wagner-Fischer Algorithm, as it's described [here](https://en.wikipedia.org/wiki/Levenshtein_distance)
-    pub fn edit_distance(key_a : &[KeyCharT], key_b : &[KeyCharT]) -> u64 {
-
-        let m = key_a.len()+1;
-        let n = key_b.len()+1;
-
-        //Allocate a 2-dimensional vec for the distances between the first i characters of key_a
-        //and the first j characters of key_b
-        let mut d : [[u8; MAX_KEY_LENGTH + 1]; MAX_KEY_LENGTH + 1] = unsafe { MaybeUninit::uninit().assume_init() };
-
-        //NOTE: I personally find this (below) more readable, but clippy really like the other style.  -\_(..)_/-
-        // for i in 1..m {
-        //     d[i][0] = i;
-        // }
-        for (i, row) in d.iter_mut().enumerate().skip(1) {
-            //row[0] = i as u8;
-            let element = unsafe{ row.get_unchecked_mut(0) };
-            *element = i as u8;
-        }
-
-        // for j in 1..n {
-        //     d[0][j] = j as u8;
-        // }
-        for (j, element) in d[0].iter_mut().enumerate() {
-            *element = j as u8;
-        }
-
-        for j in 1..n {
-            for i in 1..m {
-
-                //TODO: There is one potential optimization left.  There is no reason to allcate a whole
-                // square buffer of MAX_KEY_LENGTH on a side, because we never look back before the previous
-                // line in the buffer.  A more cache-friendly approach might be to allocate a
-                // MAX_KEY_LENGTH x 2 buffer, and then alternate between writing the values in one line
-                // and reading them from the previous line.
-
-                let substitution_cost = if key_a[i-1] == key_b[j-1] {
-                    0
-                } else {
-                    1
-                };
-
-                //let deletion_distance = d[i-1][j] + 1;
-                let deletion_distance = unsafe {d.get_unchecked(i-1).get_unchecked(j)} + 1;
-                //let insertion_distance = d[i][j-1] + 1;
-                let insertion_distance = unsafe {d.get_unchecked(i).get_unchecked(j-1)} + 1;
-                //let substitution_distance = d[i-1][j-1] + substitution_cost;
-                let substitution_distance = unsafe {d.get_unchecked(i-1).get_unchecked(j-1)} + substitution_cost;
-
-                let smallest_distance = min(min(deletion_distance, insertion_distance), substitution_distance);
-                
-                //d[i][j] = smallest_distance;  
-                let element = unsafe{ d.get_unchecked_mut(i).get_unchecked_mut(j) };
-                *element = smallest_distance;
-            }
-        }
-
-        d[m-1][n-1] as u64
-    }
-
     #[cfg(feature = "perf_counters")]
     pub fn reset_perf_counters(&self) {
         self.perf_counters.set(PerfCounters::new());
     }
 }
 
-impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize>Table<char, ValueT, MAX_DELETES, MEANINGFUL_KEY_LEN, true> {
+impl <DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, ValueT : 'static + Serialize + serde::de::DeserializeOwned>Table<char, DistanceT, ValueT, true> {
 
     /// Inserts a new key-value pair into the table and returns the RecordID of the new record
     /// 
@@ -1901,7 +1953,7 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
         self.lookup_exact_internal(&key).map(|result_vec| result_vec.into_iter())
     }
 
-    /// Locates all records in the table with a key that is within a deletion distance of MAX_DELETES of
+    /// Locates all records in the table with a key that is within a deletion distance of [config.max_deletes] of
     /// the key supplied, based on the SymSpell algorithm.
     /// 
     /// This function underlies all fuzzy lookups, and does no further filtering based on any distance function.
@@ -1917,26 +1969,26 @@ impl <ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELE
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_fuzzy<'a, D : 'static + Copy + Zero + PartialOrd, F : 'a + Fn(&[char], &[char])->D>(&'a self, key : &'a str, distance_function : F, threshold : D) -> Result<impl Iterator<Item=(RecordID, D)> + 'a, String> {
-        self.lookup_fuzzy_internal(&key, distance_function, Some(threshold))
+    pub fn lookup_fuzzy<'a>(&'a self, key : &'a str, threshold : DistanceT) -> Result<impl Iterator<Item=(RecordID, DistanceT)> + 'a, String> {
+        self.lookup_fuzzy_internal(&key, Some(threshold))
     }
 
     /// Locates the record in the table for which the supplied `distance_function` evaluates to the lowest value
     /// when comparing the record's key with the supplied `key`.
     /// 
-    /// If no matching record is found within the table's `MAX_DELETES`, this method will return an error.
+    /// If no matching record is found within the table's `config.max_deletes`, this method will return an error.
     /// 
     /// NOTE: If two or more results have the same returned distance value and that is the smallest value, the
     /// implementation does not specify which result will be returned.
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_best<'a, D : 'static + Copy + Zero + PartialOrd, F : 'a + Fn(&[char], &[char])->D>(&'a self, key : &'a str, distance_function : F) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
-        self.lookup_best_internal(&key, distance_function)
+    pub fn lookup_best<'a>(&'a self, key : &'a str) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
+        self.lookup_best_internal(&key)
     }
 }
 
-impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned, ValueT : 'static + Serialize + serde::de::DeserializeOwned, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize>Table<KeyCharT, ValueT, MAX_DELETES, MEANINGFUL_KEY_LEN, false> {
+impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned, DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, ValueT : 'static + Serialize + serde::de::DeserializeOwned>Table<KeyCharT, DistanceT, ValueT, false> {
 
     /// Inserts a new key-value pair into the table and returns the RecordID of the new record
     /// 
@@ -2043,7 +2095,7 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
         self.lookup_exact_internal(&key).map(|result_vec| result_vec.into_iter())
     }
 
-    /// Locates all records in the table with a key that is within a deletion distance of MAX_DELETES of
+    /// Locates all records in the table with a key that is within a deletion distance of `config.max_deletes` of
     /// the key supplied, based on the SymSpell algorithm.
     /// 
     /// This function underlies all fuzzy lookups, and does no further filtering based on any distance function.
@@ -2059,26 +2111,26 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_fuzzy<'a, D : 'static + Copy + Zero + PartialOrd, F : 'a + Fn(&[KeyCharT], &[KeyCharT])->D>(&'a self, key : &'a [KeyCharT], distance_function : F, threshold : D) -> Result<impl Iterator<Item=(RecordID, D)> + 'a, String> {
-        self.lookup_fuzzy_internal(&key, distance_function, Some(threshold))
+    pub fn lookup_fuzzy<'a>(&'a self, key : &'a [KeyCharT], threshold : DistanceT) -> Result<impl Iterator<Item=(RecordID, DistanceT)> + 'a, String> {
+        self.lookup_fuzzy_internal(&key, Some(threshold))
     }
 
     /// Locates the record in the table for which the supplied `distance_function` evaluates to the lowest value
     /// when comparing the record's key with the supplied `key`.
     /// 
-    /// If no matching record is found within the table's `MAX_DELETES`, this method will return an error.
+    /// If no matching record is found within the table's `config.max_deletes`, this method will return an error.
     /// 
     /// NOTE: If two or more results have the same returned distance value and that is the smallest value, the
     /// implementation does not specify which result will be returned.
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_best<'a, D : 'static + Copy + Zero + PartialOrd, F : 'a + Fn(&[KeyCharT], &[KeyCharT])->D>(&'a self, key : &'a [KeyCharT], distance_function : F) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
-        self.lookup_best_internal(&key, distance_function)
+    pub fn lookup_best<'a>(&'a self, key : &'a [KeyCharT]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
+        self.lookup_best_internal(&key)
     }
 }
 
-impl <KeyCharT, ValueT, const MAX_DELETES : usize, const MEANINGFUL_KEY_LEN : usize, const UTF8_KEYS : bool>Drop for Table<KeyCharT, ValueT, MAX_DELETES, MEANINGFUL_KEY_LEN, UTF8_KEYS> {
+impl <KeyCharT, DistanceT, ValueT, const UTF8_KEYS : bool>Drop for Table<KeyCharT, DistanceT, ValueT, UTF8_KEYS> {
     fn drop(&mut self) {
         //Close down Rocks
         self.db.flush().unwrap();
@@ -2170,7 +2222,8 @@ mod tests {
 
     
         //Create the FuzzyRocks Table, and clear out any records that happen to be hanging out
-        let mut table = Table::<char, i32, 2, 12, true>::new("geonames.rocks").unwrap();
+        let config = TableConfig::<char, u8, i32, true>::default();
+        let mut table = Table::new("geonames.rocks", config).unwrap();
         table.reset().unwrap();
 
         //Data structure to parse the GeoNames TSV file into
@@ -2258,7 +2311,8 @@ mod tests {
         drop(london_results);
 
         //Reopen the table and confirm that "London" is still there
-        let table = Table::<char, i32, 2, 12, true>::new("geonames.rocks").unwrap();
+        let config = TableConfig::<char, u8, i32, true>::default();
+        let table = Table::new("geonames.rocks", config).unwrap();
         let london_results : Vec<i32> = table.lookup_exact("london").unwrap().map(|record_id| table.get_value(record_id).unwrap()).collect();
         assert!(london_results.contains(&2643743)); //2643743 is the geonames_id of "London"
     }
@@ -2267,7 +2321,9 @@ mod tests {
     fn fuzzy_rocks_test() {
 
         //Create and reset the FuzzyRocks Table
-        let mut table = Table::<char, String, 2, 8, true>::new("test.rocks").unwrap();
+        let mut config = DEFAULT_UTF8_TABLE;
+        config.meaningful_key_len = 8;
+        let mut table = Table::<char, u8, String, true>::new("test.rocks", config).unwrap();
         table.reset().unwrap();
 
         //Insert some records
@@ -2290,17 +2346,17 @@ mod tests {
         assert_eq!(results.len(), 0);
 
         //Test lookup_best, using the supplied edit_distance function
-        let results : Vec<RecordID> = table.lookup_best("Bonday", table.default_distance_func()).unwrap().collect();
+        let results : Vec<RecordID> = table.lookup_best("Bonday").unwrap().collect();
         assert_eq!(results.len(), 1);
         assert!(results.contains(&mon));
 
         //Test lookup_best, when there is no acceptable match
-        let results : Vec<RecordID> = table.lookup_best("Rahu", table.default_distance_func()).unwrap().collect();
+        let results : Vec<RecordID> = table.lookup_best("Rahu").unwrap().collect();
         assert_eq!(results.len(), 0);
 
         //Test lookup_fuzzy with a perfect match, using the supplied edit_distance function
         //In this case, we should only get one match within edit-distance 2
-        let results : Vec<(String, String, u64)> = table.lookup_fuzzy("Saturday", table.default_distance_func(), 2)
+        let results : Vec<(String, String, u8)> = table.lookup_fuzzy("Saturday", 2)
             .unwrap().map(|(record_id, distance)| {
                 let (key, val) = table.get(record_id).unwrap();
                 (key, val, distance)
@@ -2311,7 +2367,7 @@ mod tests {
         assert_eq!(results[0].2, 0);
 
         //Test lookup_fuzzy with a perfect match, but where we'll hit another imperfect match as well
-        let results : Vec<(String, String, u64)> = table.lookup_fuzzy("Tuesday", table.default_distance_func(), 2)
+        let results : Vec<(String, String, u8)> = table.lookup_fuzzy("Tuesday", 2)
             .unwrap().map(|(record_id, distance)| {
                 let (key, val) = table.get(record_id).unwrap();
                 (key, val, distance)
@@ -2321,11 +2377,11 @@ mod tests {
         assert!(results.contains(&("Thursday".to_string(), "Mokuyoubi".to_string(), 2)));
 
         //Test lookup_fuzzy where we should get no match
-        let results : Vec<(RecordID, u64)> = table.lookup_fuzzy("Rahu", table.default_distance_func(), 2).unwrap().collect();
+        let results : Vec<(RecordID, u8)> = table.lookup_fuzzy("Rahu", 2).unwrap().collect();
         assert_eq!(results.len(), 0);
 
         //Test lookup_fuzzy_raw, to get all of the SymSpell Delete variants
-        //We're testing the fact that characters beyond MEANINGFUL_KEY_LEN aren't used for the comparison
+        //We're testing the fact that characters beyond `config.meaningful_key_len` aren't used for the comparison
         let results : Vec<RecordID> = table.lookup_fuzzy_raw("Sunday. That's my fun day.").unwrap().collect();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], sun);
@@ -2336,7 +2392,7 @@ mod tests {
 
         //Since "Tuesday" had one variant overlap with "Thursday", i.e. "Tusday", make sure we now find
         // "Thursday" when we attempt to lookup "Tuesday"
-        let results : Vec<RecordID> = table.lookup_best("Tuesday", table.default_distance_func()).unwrap().collect();
+        let results : Vec<RecordID> = table.lookup_best("Tuesday").unwrap().collect();
         assert_eq!(results.len(), 1);
         assert!(results.contains(&thu));
 
@@ -2459,7 +2515,10 @@ mod tests {
     /// This test is tests some basic non-unicode key functionality.
     fn non_unicode_key_test() {
 
-        let mut table = Table::<u8, f32, 1, 8, false>::new("test2.rocks").unwrap();
+        let mut config = TableConfig::<u8, u8, f32, false>::default();
+        config.max_deletes = 1;
+        config.meaningful_key_len = 8;
+        let mut table = Table::<u8, u8, f32, false>::new("test2.rocks", config).unwrap();
         table.reset().unwrap();
 
         let one = table.insert(b"One", &1.0).unwrap();
@@ -2467,7 +2526,7 @@ mod tests {
         let _three = table.insert(b"San", &3.0).unwrap();
         let pi = table.insert(b"Pi", &3.1415926535).unwrap();
 
-        let results : Vec<RecordID> = table.lookup_best(b"P", table.default_distance_func()).unwrap().collect();
+        let results : Vec<RecordID> = table.lookup_best(b"P").unwrap().collect();
         assert_eq!(results.len(), 1);
         assert!(results.contains(&pi));
         
@@ -2481,7 +2540,8 @@ mod tests {
     fn perf_counters_test() {
 
         //Initialize the table with a very big database
-        let table = Table::<char, i32, 2, 12, true>::new("all_cities.geonames.rocks").unwrap();
+        let config = TableConfig::<char, u8, i32, true>::default();
+        let table = Table::new("all_cities.geonames.rocks", config).unwrap();
 
         //Make sure we have no pathological case of a variant for a zero-length string
         let iter = table.lookup_fuzzy_raw("").unwrap();
@@ -2490,14 +2550,14 @@ mod tests {
         #[cfg(feature = "perf_counters")]
         {
             //Make sure we are on the fast path that doesn't fetch the keys for the case when the key
-            //length entirely fits within MEANINGFUL_KEY_LEN
+            //length entirely fits within config.meaningful_key_len
             table.reset_perf_counters();
             let _iter = table.lookup_exact("london").unwrap();
             assert_eq!(table.perf_counters.get().key_group_lookup_count, 0);
 
             //Test that the other counters do something...
             table.reset_perf_counters();
-            let iter = table.lookup_fuzzy("london", table.default_distance_func(), 3).unwrap();
+            let iter = table.lookup_fuzzy("london", 3).unwrap();
             let _ = iter.count();
             assert!(table.perf_counters.get().variant_load_count > 0);
             assert!(table.perf_counters.get().key_group_lookup_count > 0);
