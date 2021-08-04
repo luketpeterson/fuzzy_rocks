@@ -57,6 +57,8 @@ pub fn lookup_benchmark(c: &mut Criterion) {
     })));
 
     let mut rng = Pcg64::seed_from_u64(1);
+    let mut miss_count = 0;
+    let mut hit_count = 0;
     c.bench_function("lookup_fuzzy_all_random", |b| b.iter(|| black_box( {
         let len : usize = rng.gen_range(4..20);
         let mut chars_vec : Vec<u8> = vec![0; len];
@@ -68,12 +70,17 @@ pub fn lookup_benchmark(c: &mut Criterion) {
         }
         let fuzzy_key : String = chars_vec.into_iter().map(|the_char| the_char as char).collect();
         let iter = table.lookup_fuzzy(&fuzzy_key, 2).unwrap();
-        let _count = iter.count();
-        // if count > 0 {
-        //     println!("random_fuzzy_key: {}, num_hits: {}", &fuzzy_key, count);
-        // }
+        let count = iter.count();
+        if count > 0 {
+            hit_count += 1;
+            // println!("random_fuzzy_key: {}, num_hits: {}", &fuzzy_key, count);
+        } else {
+            miss_count += 1;
+        }
     })));
+    // println!("hit_count: {}, miss_count: {}, hit_ratio: {}", hit_count, miss_count, (hit_count as f64) / ((hit_count + miss_count) as f64));
 
+    
 }
 
 criterion_group!(benches, lookup_benchmark);
