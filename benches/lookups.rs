@@ -1,8 +1,11 @@
 
+use rand::prelude::*;
+use rand_pcg::Pcg64;
+
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use fuzzy_rocks::{*};
 
-pub fn london_lookup_benchmark(c: &mut Criterion) {
+pub fn lookup_benchmark(c: &mut Criterion) {
 
     //Initialize the table with a very big database
     let config = TableConfig::<char, u8, i32, true>::default();
@@ -44,18 +47,36 @@ pub fn london_lookup_benchmark(c: &mut Criterion) {
     
     //Perform the same fuzzy lookup, but iterate over all of the results
     c.bench_function("lookup_fuzzy_all_london", |b| b.iter(|| black_box( {
-        let iter = table.lookup_fuzzy("london", 3).unwrap();
+        let iter = table.lookup_fuzzy("london", 2).unwrap();
         let _ = iter.count();
     })));
 
     c.bench_function("lookup_fuzzy_all_tokyo", |b| b.iter(|| black_box( {
-        let iter = table.lookup_fuzzy("tokyo", 3).unwrap();
+        let iter = table.lookup_fuzzy("tokyo", 2).unwrap();
         let _ = iter.count();
+    })));
+
+    let mut rng = Pcg64::seed_from_u64(1);
+    c.bench_function("lookup_fuzzy_all_random", |b| b.iter(|| black_box( {
+        let len : usize = rng.gen_range(4..20);
+        let mut chars_vec : Vec<u8> = vec![0; len];
+        for the_char in chars_vec.iter_mut() {
+            *the_char = rng.gen_range(96..123);
+            if *the_char == 96 {
+                *the_char = ' ' as u8;
+            }
+        }
+        let fuzzy_key : String = chars_vec.into_iter().map(|the_char| the_char as char).collect();
+        let iter = table.lookup_fuzzy(&fuzzy_key, 2).unwrap();
+        let _count = iter.count();
+        // if count > 0 {
+        //     println!("random_fuzzy_key: {}, num_hits: {}", &fuzzy_key, count);
+        // }
     })));
 
 }
 
-criterion_group!(benches, london_lookup_benchmark);
+criterion_group!(benches, lookup_benchmark);
 criterion_main!(benches);
 
 //NOTE: invoke flamegraph in criterion with:

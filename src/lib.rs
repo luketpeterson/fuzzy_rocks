@@ -2614,9 +2614,5 @@ mod tests {
 
 //GOATGOATGOAT, Clippy, and update documentation
 
-//GOATGOAT, Provide a convenience type alias for a table with utf8 keys
-
-//GOATGOAT Create a random keys lookup benchmark, where I generate a random key each time
-
 //GOAT Let Wolf Garbe know about my crate when I publish FuzzyRocks v0.2
 
