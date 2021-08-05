@@ -157,10 +157,6 @@
 //      *Save the Table config to the database (and the checksum of the distance function) to
 //      detect an error when the config changes in a way that makes the database invalid
 
-//GOATGOATGOAT
-//Create a parameter block for generic initialization.
-// The distance function should be part of the parameter block, and therefore part of the table
-
 use core::marker::PhantomData;
 use core::cmp::{min, Ordering};
 use core::hash::Hash;
@@ -2609,8 +2605,6 @@ mod tests {
 //√ 11.) API that counts the number of keys that a given record has
 
 //GOATGOATGOAT, Move "BinCode Helpers" into separate file
-
-//GOATGOATGOAT, Do a separate test for a ValueT of size 0
 
 //GOATGOATGOAT, Clippy, and update documentation
 

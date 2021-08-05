@@ -80,7 +80,7 @@ pub fn lookup_benchmark(c: &mut Criterion) {
     })));
     // println!("hit_count: {}, miss_count: {}, hit_ratio: {}", hit_count, miss_count, (hit_count as f64) / ((hit_count + miss_count) as f64));
 
-    
+    //TODO: A benchmark that uses actual keys from the DB
 }
 
 criterion_group!(benches, lookup_benchmark);
