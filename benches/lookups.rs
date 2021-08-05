@@ -56,6 +56,11 @@ pub fn lookup_benchmark(c: &mut Criterion) {
         let _ = iter.count();
     })));
 
+    // This benchmark generates random lowercase ascii + space keys.  Unfortunately (or
+    // fortunately depending on your perspective), RocksDB optimizes the DB based on previously
+    // queried items.  Therefore, this benchmark gets faster each time you run it.  But
+    // that doesn't mean the implementation has actually improved, just that RocksDB is
+    // optimizing for the benchmark.
     let mut rng = Pcg64::seed_from_u64(1);
     let mut miss_count = 0;
     let mut hit_count = 0;

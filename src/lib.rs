@@ -462,7 +462,7 @@ const VARIANTS_CF_NAME : &str = "variants";
 
 /// A private trait representing the subset of key types that are owned and therefore 'static
 //GOAT, make this trait private, which means refactoring the modules
-pub trait OwnedKey<KeyCharT> : 'static + Sized + Serialize + serde::de::DeserializeOwned + Key<'static, KeyCharT> {
+pub trait OwnedKey<KeyCharT> : 'static + Sized + Serialize + serde::de::DeserializeOwned + Key<KeyCharT> {
     fn as_string(&self) -> Option<String>;
     fn borrow_str(&self) -> Option<&str>;
     fn as_vec(&self) -> Option<Vec<KeyCharT>>;
@@ -509,7 +509,7 @@ pub trait TableKeyEncoding<KeyCharT> {
     fn owned_key_into_buf<'a>(key : &'a Self::OwnedKeyT, buf : &'a mut Vec<KeyCharT>) -> &'a Vec<KeyCharT>;
     fn owned_key_from_string(s : String) -> Self::OwnedKeyT;
     fn owned_key_from_vec(v : Vec<KeyCharT>) -> Self::OwnedKeyT;
-    fn owned_key_from_key<'a, K : Key<'a, KeyCharT>>(k : &K) -> Self::OwnedKeyT;
+    fn owned_key_from_key<K : Key<KeyCharT>>(k : &K) -> Self::OwnedKeyT;
 }
 
 impl <DistanceT, ValueT>TableKeyEncoding<char> for Table<char, DistanceT, ValueT, true> {
@@ -553,7 +553,7 @@ impl <DistanceT, ValueT>TableKeyEncoding<char> for Table<char, DistanceT, ValueT
     fn owned_key_from_vec(_v : Vec<char>) -> Self::OwnedKeyT {
         panic!() //NOTE: Should never be called when the OwnedKeyT isn't a Vec
     }
-    fn owned_key_from_key<'a, K : Key<'a, char>>(k : &K) -> Self::OwnedKeyT {
+    fn owned_key_from_key<K : Key<char>>(k : &K) -> Self::OwnedKeyT {
         k.borrow_key_str().unwrap().to_string() //NOTE: the unwrap() will panic if called with the wrong kind of key
     }
 }
@@ -574,14 +574,14 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     fn owned_key_from_vec(v : Vec<KeyCharT>) -> Self::OwnedKeyT {
         v
     }
-    fn owned_key_from_key<'a, K : Key<'a, KeyCharT>>(k : &K) -> Self::OwnedKeyT {
+    fn owned_key_from_key<K : Key<KeyCharT>>(k : &K) -> Self::OwnedKeyT {
         k.get_key_chars()
     }
 }
 
 /// Implemented by all types that can be used as keys, whether they are UTF-8 encoded
 /// strings or arrays of KeyCharT
-pub trait Key<'a, KeyCharT> : KeyUnsafe<'a, KeyCharT> {
+pub trait Key<KeyCharT> : KeyUnsafe<KeyCharT> {
 
     fn num_chars(&self) -> usize;
     fn as_bytes(&self) -> &[u8];
@@ -589,18 +589,17 @@ pub trait Key<'a, KeyCharT> : KeyUnsafe<'a, KeyCharT> {
     fn borrow_key_chars(&self) -> Option<&[KeyCharT]>;
     fn get_key_chars(&self) -> Vec<KeyCharT>;
     fn borrow_key_str(&self) -> Option<&str>;
-    fn from_owned<OwnedKeyT : OwnedKey<KeyCharT>>(owned_key : &'a OwnedKeyT) -> Self;
 }
 
 /// The private unsafe accessors for the Key trait
 //GOATGOAT, Make this private, which means refactoring the modules.
-pub trait KeyUnsafe<'a, KeyCharT> : Eq + Hash + Clone + Serialize {
+pub trait KeyUnsafe<KeyCharT> : Eq + Hash + Clone + Serialize {
     /// This function may return a result that borrows the owned_key parameter, but the
     /// returned result may have a longer lifetime on account of the type it's called with
-    unsafe fn from_owned_unsafe<OwnedKeyT : OwnedKey<KeyCharT>>(owned_key : &OwnedKeyT) -> Self;
+    unsafe fn from_owned_unsafe<'b, OwnedKeyT : OwnedKey<KeyCharT>>(owned_key : &'b OwnedKeyT) -> Self;
 }
 
-impl <'a, KeyCharT>Key<'a, KeyCharT> for &'a [KeyCharT]
+impl <KeyCharT>Key<KeyCharT> for &[KeyCharT]
     where
     KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned,
 {
@@ -636,15 +635,11 @@ impl <'a, KeyCharT>Key<'a, KeyCharT> for &'a [KeyCharT]
     fn borrow_key_str(&self) -> Option<&str> {
         None
     }
-
-    fn from_owned<OwnedKeyT : OwnedKey<KeyCharT>>(owned_key : &'a OwnedKeyT) -> Self {
-        owned_key.borrow_vec().unwrap()
-    }
 }
 
-impl <'a, KeyCharT>KeyUnsafe<'a, KeyCharT> for &'a [KeyCharT]
+impl <'a, KeyCharT>KeyUnsafe<KeyCharT> for &'a [KeyCharT]
     where
-    KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned,
+    KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned
 {
     unsafe fn from_owned_unsafe<OwnedKeyT : OwnedKey<KeyCharT>>(owned_key : &OwnedKeyT) -> Self {
         let result = owned_key.borrow_vec().unwrap();
@@ -652,7 +647,7 @@ impl <'a, KeyCharT>KeyUnsafe<'a, KeyCharT> for &'a [KeyCharT]
     }
 }
 
-impl <KeyCharT>Key<'_, KeyCharT> for Vec<KeyCharT>
+impl <KeyCharT>Key<KeyCharT> for Vec<KeyCharT>
     where
     KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned,
 {
@@ -687,13 +682,9 @@ impl <KeyCharT>Key<'_, KeyCharT> for Vec<KeyCharT>
     fn borrow_key_str(&self) -> Option<&str> {
         None
     }
-
-    fn from_owned<OwnedKeyT : OwnedKey<KeyCharT>>(owned_key : &OwnedKeyT) -> Self {
-        owned_key.as_vec().unwrap()
-    }
 }
 
-impl <KeyCharT>KeyUnsafe<'_, KeyCharT> for Vec<KeyCharT>
+impl <KeyCharT>KeyUnsafe<KeyCharT> for Vec<KeyCharT>
     where
     KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned,
 {
@@ -703,7 +694,7 @@ impl <KeyCharT>KeyUnsafe<'_, KeyCharT> for Vec<KeyCharT>
     }
 }
 
-impl <'a>Key<'a, char> for &'a str
+impl Key<char> for &str
 {
     fn num_chars(&self) -> usize {
         unicode_len(self)
@@ -729,14 +720,9 @@ impl <'a>Key<'a, char> for &'a str
     fn borrow_key_str(&self) -> Option<&str> {
         Some(self)
     }
-
-    fn from_owned<OwnedKeyT : OwnedKey<char>>(owned_key : &'a OwnedKeyT) -> Self {
-        owned_key.borrow_str().unwrap()
-    }
-
 }
 
-impl <'a>KeyUnsafe<'a, char> for &'a str {
+impl <'a>KeyUnsafe<char> for &'a str {
 
     unsafe fn from_owned_unsafe<OwnedKeyT : OwnedKey<char>>(owned_key : &OwnedKeyT) -> Self {
         let result = owned_key.borrow_str().unwrap();
@@ -744,7 +730,7 @@ impl <'a>KeyUnsafe<'a, char> for &'a str {
     }
 }
 
-impl Key<'_, char> for String
+impl Key<char> for String
 {
     fn num_chars(&self) -> usize {
         unicode_len(self)
@@ -769,13 +755,9 @@ impl Key<'_, char> for String
     fn borrow_key_str(&self) -> Option<&str> {
         Some(&self)
     }
-
-    fn from_owned<OwnedKeyT : OwnedKey<char>>(owned_key : &OwnedKeyT) -> Self {
-        owned_key.as_string().unwrap()
-    }
 }
 
-impl KeyUnsafe<'_, char> for String {
+impl KeyUnsafe<char> for String {
 
     unsafe fn from_owned_unsafe<OwnedKeyT : OwnedKey<char>>(owned_key : &OwnedKeyT) -> Self {
         //This implementation is actually safe, but the fn prototype is unsafe
@@ -966,7 +948,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     /// Divides the keys up into key groups and assigns them to a record.
     /// 
     /// Should NEVER be called on a record that already has keys or orphaned database entries will result
-    fn put_record_keys<'a, K : Key<'a, KeyCharT> + 'a, KeysIterT : Iterator<Item=&'a K>>(&mut self, record_id : RecordID, keys_iter : KeysIterT, num_keys : usize) -> Result<(), String> {
+    fn put_record_keys<'a, K : Key<KeyCharT> + 'a, KeysIterT : Iterator<Item=&'a K>>(&mut self, record_id : RecordID, keys_iter : KeysIterT, num_keys : usize) -> Result<(), String> {
     
         //Make groups for the keys
         let groups = self.make_groups_from_keys(keys_iter, num_keys).unwrap();
@@ -993,7 +975,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     /// 
     /// This function is the owner of the decision whether or not to add a key to an existing
     /// group or to create a new group for a key
-    fn add_key_to_groups<'a, K : Key<'a, KeyCharT>>(&self, key : &K, groups : &mut KeyGroups<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>, update_reverse_map : bool) -> Result<(), String> {
+    fn add_key_to_groups<K : Key<KeyCharT>>(&self, key : &K, groups : &mut KeyGroups<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>, update_reverse_map : bool) -> Result<(), String> {
         
         //Make sure the key is within the maximum allowable MAX_KEY_LENGTH
         if key.num_chars() > MAX_KEY_LENGTH {
@@ -1080,7 +1062,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     /// Divides a list of keys up into one or more key groups based on some criteria; the primary
     /// of which is the overlap between key variants.  Keys with more overlapping variants are more
     /// likely to belong in the same group and keys with fewer or none are less likely.
-    fn make_groups_from_keys<'a, K : Key<'a, KeyCharT> + 'a, KeysIterT : Iterator<Item=&'a K>>(&self, keys_iter : KeysIterT, num_keys : usize) -> Result<KeyGroups<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>, String> {
+    fn make_groups_from_keys<'a, K : Key<KeyCharT> + 'a, KeysIterT : Iterator<Item=&'a K>>(&self, keys_iter : KeysIterT, num_keys : usize) -> Result<KeyGroups<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>, String> {
 
         //Start with empty key groups, and add the keys one at a time
         let mut groups = KeyGroups::new();
@@ -1147,7 +1129,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     }
 
     /// Add additional keys to a record, including creation of all associated variants
-    fn add_keys_internal<'a, K : Key<'a, KeyCharT> + 'a, KeysIterT : Iterator<Item=&'a K>>(&mut self, record_id : RecordID, keys_iter : KeysIterT, num_keys : usize) -> Result<(), String> {
+    fn add_keys_internal<'a, K : Key<KeyCharT> + 'a, KeysIterT : Iterator<Item=&'a K>>(&mut self, record_id : RecordID, keys_iter : KeysIterT, num_keys : usize) -> Result<(), String> {
 
         //Get the record's existing key groups and variants, so we can figure out the
         //best places for each additional new key
@@ -1197,7 +1179,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     /// 
     /// If one of the specified keys is not associated with the record then that specified
     /// key will be ignored.
-    fn remove_keys_internal<'a, K : Key<'a, KeyCharT>>(&mut self, record_id : RecordID, remove_keys : &HashSet<&K>) -> Result<(), String> {
+    fn remove_keys_internal<K : Key<KeyCharT>>(&mut self, record_id : RecordID, remove_keys : &HashSet<&K>) -> Result<(), String> {
 
         //Get all of the existing groups
         let group_ids : Vec<KeyGroupID> = self.get_key_groups(record_id)?.collect();
@@ -1289,7 +1271,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     }
 
     /// Replaces all of the keys in a record with the supplied keys
-    fn replace_keys_internal<'a, K : Key<'a, KeyCharT>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
+    fn replace_keys_internal<'a, K : Key<KeyCharT>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
 
         if keys.len() < 1 {
             return Err("record must have at least one key".to_string());
@@ -1352,7 +1334,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    fn insert_internal<'a, K : Key<'a, KeyCharT> + 'a, KeysIterT : Iterator<Item=&'a K>>(&mut self, keys_iter : KeysIterT, num_keys : usize, value : &ValueT) -> Result<RecordID, String> {
+    fn insert_internal<'a, K : Key<KeyCharT> + 'a, KeysIterT : Iterator<Item=&'a K>>(&mut self, keys_iter : KeysIterT, num_keys : usize, value : &ValueT) -> Result<RecordID, String> {
 
         if num_keys < 1 {
             return Err("record must have at least one key".to_string());
@@ -1384,7 +1366,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     /// the closure to avoid doing duplicate work.
     /// 
     /// QUESTION: should the visitor closure be able to return a bool, to mean "stop" or "keep going"?
-    fn visit_fuzzy_candidates<'a, K : Key<'a, KeyCharT>, F : FnMut(KeyGroupID)>(&self, key : &K, mut visitor : F) -> Result<(), String> {
+    fn visit_fuzzy_candidates<K : Key<KeyCharT>, F : FnMut(KeyGroupID)>(&self, key : &K, mut visitor : F) -> Result<(), String> {
 
         if key.num_chars() > MAX_KEY_LENGTH {
             return Err("key length exceeds MAX_KEY_LENGTH".to_string());
@@ -1420,7 +1402,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
         Ok(())
     }
 
-    fn lookup_fuzzy_raw_internal<'a, K : Key<'a, KeyCharT>>(&self, key : &K) -> Result<impl Iterator<Item=RecordID>, String> {
+    fn lookup_fuzzy_raw_internal<K : Key<KeyCharT>>(&self, key : &K) -> Result<impl Iterator<Item=RecordID>, String> {
 
         //Create a new HashSet to hold all of the RecordIDs that we find
         let mut result_set = HashSet::new(); //TODO, may want to allocate this with a non-zero capacity
@@ -1446,7 +1428,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     /// It would be necessary to evaluate every key group for a particular record before returning the
     /// record.  The decision not to do this is on account of the fact that [lookup_fuzzy_raw_internal]
     /// could be used instead if the caller wants a quick-to-return iterator.
-    fn lookup_fuzzy_internal<'a, K : Key<'a, KeyCharT>>(&self, key : &K, threshold : Option<DistanceT>) -> Result<impl Iterator<Item=(RecordID, DistanceT)>, String> {
+    fn lookup_fuzzy_internal<K : Key<KeyCharT>>(&self, key : &K, threshold : Option<DistanceT>) -> Result<impl Iterator<Item=(RecordID, DistanceT)>, String> {
 
         let distance_function = self.config.distance_function;
 
@@ -1513,7 +1495,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
         Ok(result_map.into_iter())
     }
 
-    fn lookup_best_internal<'a, K : Key<'a, KeyCharT>>(&self, key : &K) -> Result<impl Iterator<Item=RecordID>, String> {
+    fn lookup_best_internal<K : Key<KeyCharT>>(&self, key : &K) -> Result<impl Iterator<Item=RecordID>, String> {
 
         //First, we should check to see if lookup_exact gives us what we want.  Because if it does,
         // it's muuuuuuch faster.  If we have an exact result, no other key will be a better match
@@ -1549,7 +1531,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     /// Checks the table for records with keys that precisely match the key supplied
     /// 
     /// This function will be more efficient than a fuzzy lookup.
-    fn lookup_exact_internal<'a, K : Key<'a, KeyCharT>>(&self, lookup_key : &K) -> Result<Vec<RecordID>, String> {
+    fn lookup_exact_internal<K : Key<KeyCharT>>(&self, lookup_key : &K) -> Result<Vec<RecordID>, String> {
 
         let lookup_key_len = lookup_key.num_chars();
         if lookup_key_len > MAX_KEY_LENGTH {
@@ -1755,7 +1737,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     }
 
     // Returns the "meaningful" part of a key, that is used as the starting point to generate the variants
-    fn meaningful_key_substring<'a, K : Key<'a, KeyCharT>>(&self, key: &K) -> <Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT {
+    fn meaningful_key_substring<K : Key<KeyCharT>>(&self, key: &K) -> <Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT {
         if UTF8_KEYS {
             let result_string = unicode_truncate(key.borrow_key_str().unwrap(), self.config.meaningful_key_len);
             Self::owned_key_from_string(result_string)
@@ -1772,7 +1754,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
 
     // Returns a new owned key, that is a variant of the supplied key, without the character at the
     // specified index
-    fn remove_char_from_key<'a, K : Key<'a, KeyCharT>>(key: &K, idx : usize) -> <Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT {
+    fn remove_char_from_key<K : Key<KeyCharT>>(key: &K, idx : usize) -> <Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT {
         if UTF8_KEYS {
             let result_string = unicode_remove_char(key.borrow_key_str().unwrap(), idx);
             Self::owned_key_from_string(result_string)
@@ -1784,7 +1766,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     }
 
     /// Returns all of the variants of a key, for querying or adding to the variants database
-    fn variants<'a, K : Key<'a, KeyCharT>>(&self, key: &K) -> HashSet<Vec<u8>> {
+    fn variants<K : Key<KeyCharT>>(&self, key: &K) -> HashSet<Vec<u8>> {
 
         let mut variants_set : HashSet<Vec<u8>> = HashSet::new();
         
@@ -1804,7 +1786,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     }
     
     // The recursive part of the variants() function
-    fn variants_recursive<'a, K : Key<'a, KeyCharT>>(&self, key: &K, edit_distance: usize, variants_set: &mut HashSet<Vec<u8>>) {
+    fn variants_recursive<K : Key<KeyCharT>>(&self, key: &K, edit_distance: usize, variants_set: &mut HashSet<Vec<u8>>) {
     
         let edit_distance = edit_distance + 1;
     
@@ -1871,7 +1853,7 @@ impl <DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, Val
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn create<'a, K : Key<'a, char>>(&mut self, keys : &'a [K], value : &ValueT) -> Result<RecordID, String> {
+    pub fn create<'a, K : Key<char>>(&mut self, keys : &'a [K], value : &ValueT) -> Result<RecordID, String> {
         self.insert_internal(keys.into_iter(), keys.len(), value)
     }
 
@@ -1881,7 +1863,7 @@ impl <DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, Val
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn add_keys<'a, K : Key<'a, char>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
+    pub fn add_keys<'a, K : Key<char>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
         self.add_keys_internal(record_id, keys.into_iter(), keys.len())
     }
 
@@ -1901,7 +1883,7 @@ impl <DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, Val
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn remove_keys<'a, K : Key<'a, char>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
+    pub fn remove_keys<K : Key<char>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
         let keys_set : HashSet<&K> = HashSet::from_iter(keys.into_iter());
         self.remove_keys_internal(record_id, &keys_set)
     }
@@ -1912,7 +1894,7 @@ impl <DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, Val
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn replace_keys<'a, K : Key<'a, char>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
+    pub fn replace_keys<'a, K : Key<char>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
         self.replace_keys_internal(record_id, keys)
     }
 
@@ -2024,7 +2006,7 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn create<'a, K : Key<'a, KeyCharT>>(&mut self, keys : &'a [K], value : &ValueT) -> Result<RecordID, String> {
+    pub fn create<'a, K : Key<KeyCharT>>(&mut self, keys : &'a [K], value : &ValueT) -> Result<RecordID, String> {
         let num_keys = keys.len();
         let keys_iter = keys.into_iter();
         self.insert_internal(keys_iter, num_keys, value)
@@ -2036,7 +2018,7 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn add_keys<'a, K : Key<'a, KeyCharT>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
+    pub fn add_keys<'a, K : Key<KeyCharT>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
         self.add_keys_internal(record_id, keys.into_iter(), keys.len())
     }
 
@@ -2050,7 +2032,7 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn remove_keys<'a, K : Key<'a, KeyCharT>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
+    pub fn remove_keys<K : Key<KeyCharT>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
         let keys_set : HashSet<&K> = HashSet::from_iter(keys.into_iter());
         self.remove_keys_internal(record_id, &keys_set)
     }
@@ -2061,7 +2043,7 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn replace_keys<'a, K : Key<'a, KeyCharT>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
+    pub fn replace_keys<'a, K : Key<KeyCharT>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
         self.replace_keys_internal(record_id, keys)
     }
 
