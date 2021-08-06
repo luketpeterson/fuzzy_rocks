@@ -158,7 +158,7 @@
 //      detect an error when the config changes in a way that makes the database invalid
 
 use core::marker::PhantomData;
-use core::cmp::{min, Ordering};
+use core::cmp::{Ordering};
 use core::hash::Hash;
 
 #[cfg(feature = "perf_counters")]
@@ -166,15 +166,11 @@ use core::cell::Cell;
 
 use num_traits::Zero;
 
-use serde::{Serialize, Deserialize};
-use bincode::Options;
+use serde::{Serialize};
 
 use std::collections::{HashMap, HashSet};
 use std::convert::{TryInto};
 use std::iter::FromIterator;
-use std::mem::{MaybeUninit};
-
-use rocksdb::{DB, DBWithThreadMode, ColumnFamily, ColumnFamilyDescriptor, MergeOperands};
 
 mod unicode_string_helpers;
 use unicode_string_helpers::{*};
@@ -182,9 +178,21 @@ use unicode_string_helpers::{*};
 mod bincode_helpers;
 use bincode_helpers::{*};
 
+mod database;
+use database::{*};
+
 mod key;
 use key::{*};
 pub use key::Key;
+
+mod records;
+pub use records::RecordID;
+
+mod table_config;
+pub use table_config::{TableConfig, MAX_KEY_LENGTH, DEFAULT_UTF8_TABLE};
+
+mod key_groups;
+use key_groups::{*};
 
 /// A collection containing records that may be searched by `key`
 /// 
@@ -197,155 +205,14 @@ pub use key::Key;
 /// 
 pub struct Table<KeyCharT, DistanceT, ValueT, const UTF8_KEYS : bool> {
     record_count : usize,
-    db : DBWithThreadMode<rocksdb::SingleThreaded>,
+    db : DBConnection,
     config : TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>,
-    path : String,
     deleted_records : Vec<RecordID>, //NOTE: Currently we don't try to hold onto deleted records across unloads, but we may change this in the future.
     #[cfg(feature = "perf_counters")]
     perf_counters : Cell<PerfCounters>,
     phantom_key: PhantomData<KeyCharT>,
     phantom_value: PhantomData<ValueT>,
 }
-
-// NOTE: The #![feature(const_generics)] feature isn't stabilized and I don't want to depend on
-// any unstable features.  So instead of taking the config structure as a const parameter to
-// Table, the compile-time arguments will be passed individually using the capabilities of
-// #![feature(min_const_generics)], and I'll hide that from novice API users by allowing the
-// compiler to infer the values from phantoms in the config structure.
-
-#[derive(Clone)]
-pub struct TableConfig<KeyCharT, DistanceT, ValueT, const UTF8_KEYS : bool> {
-
-    /// The number of deletes to store in the database for variants created
-    /// by the SymSpell optimization.  If `max_deletes` is too small, the variant will not be found
-    /// and therefore the `distance_function` will not have an opportunity to evaluate the match.  However,
-    /// if `max_deletes` is too large, it will hurt performance by evaluating too many candidates.
-    /// 
-    /// Empirically, values near 2 seem to be good in most situations I have found.  I.e. 1 and 3 might be
-    /// appropriate sometimes.  4 ends up exploding in most cases I've seen so the SymSpell logic may not
-    /// be a good fit if you need to find keys 4 edits away.  0 edits is an exact match.
-    pub max_deletes : usize,
-
-    /// This controls an optimization where only a subset of the key is used for creating
-    /// variants.  For example, if `meaningful_key_len = 10` then only the first 10 characters of the key will be used
-    /// to generate and search for variants.
-    /// 
-    /// This optimization is predicated on the idea that long key strings will not be very similar to each
-    /// other, and a certain number of characters is sufficient to substantially narrow down the search.
-    /// 
-    /// For example the key *incomprehensibilities* will cause variants to be generated for *incomprehe*
-    /// with a `meaningful_key_len` of 10, meaning that a search for *incomprehension* would find *incomprehensibilities*
-    /// and evauate it with the `distance_function` even though it is further than [config.max_deletes].
-    /// 
-    /// In a dataset where many keys share a common prefix, or where keys are organized into a namespace by
-    /// concatenating strings, this optimization will cause problems and you should either pass a high number
-    /// to effectively disable it, or rework this code to use different logic to select the substring
-    /// 
-    /// Lookup functions that invoke the distance function will always use the entire key, regardless of the
-    /// value of `meaningful_key_len`.
-    pub meaningful_key_len : usize,
-
-    /// The number of variants a key must share with a keys in an existing key group in order for that key to
-    /// be added to the group rather than being placed into a new separate key group.
-    /// 
-    /// NOTE: We arrived at the default value (5) empirically by testing a number of different values and
-    /// observing the effects on lookup speed, DB construction speed, and DB size.  The observed data
-    /// points are checked in, in the file: `misc/perf_data.txt`
-    pub group_variant_overlap_threshold : usize,
-    pub distance_function : fn(key_a : &[KeyCharT], key_b : &[KeyCharT]) -> DistanceT,
-    phantom_key: PhantomData<KeyCharT>,
-    phantom_distance: PhantomData<DistanceT>,
-    phantom_value: PhantomData<ValueT>,
-}
-
-impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned, DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, ValueT, const UTF8_KEYS : bool>TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS> {
-
-    pub fn default() -> Self {
-        Self {
-            max_deletes : 2,
-            meaningful_key_len : 12,
-            group_variant_overlap_threshold : 5,
-            distance_function : Self::edit_distance,
-            phantom_key : PhantomData,
-            phantom_distance : PhantomData,
-            phantom_value : PhantomData,        
-        }
-    }
-
-    /// An implementation of the basic Levenstein distance function, which may be passed to
-    /// [lookup_fuzzy](Table::lookup_fuzzy), [lookup_best](Table::lookup_best), or used anywhere
-    /// else a distance function is needed.
-    /// 
-    /// This implementation uses the Wagner-Fischer Algorithm, as it's described [here](https://en.wikipedia.org/wiki/Levenshtein_distance)
-    pub fn edit_distance(key_a : &[KeyCharT], key_b : &[KeyCharT]) -> DistanceT {
-
-        let m = key_a.len()+1;
-        let n = key_b.len()+1;
-
-        //Allocate a 2-dimensional vec for the distances between the first i characters of key_a
-        //and the first j characters of key_b
-        let mut d : [[u8; MAX_KEY_LENGTH + 1]; MAX_KEY_LENGTH + 1] = unsafe { MaybeUninit::uninit().assume_init() };
-
-        //NOTE: I personally find this (below) more readable, but clippy really like the other style.  -\_(..)_/-
-        // for i in 1..m {
-        //     d[i][0] = i;
-        // }
-        for (i, row) in d.iter_mut().enumerate().skip(1) {
-            //row[0] = i as u8;
-            let element = unsafe{ row.get_unchecked_mut(0) };
-            *element = i as u8;
-        }
-
-        // for j in 1..n {
-        //     d[0][j] = j as u8;
-        // }
-        for (j, element) in d[0].iter_mut().enumerate() {
-            *element = j as u8;
-        }
-
-        for j in 1..n {
-            for i in 1..m {
-
-                //TODO: There is one potential optimization left.  There is no reason to allcate a whole
-                // square buffer of MAX_KEY_LENGTH on a side, because we never look back before the previous
-                // line in the buffer.  A more cache-friendly approach might be to allocate a
-                // MAX_KEY_LENGTH x 2 buffer, and then alternate between writing the values in one line
-                // and reading them from the previous line.
-
-                let substitution_cost = if key_a[i-1] == key_b[j-1] {
-                    0
-                } else {
-                    1
-                };
-
-                //let deletion_distance = d[i-1][j] + 1;
-                let deletion_distance = unsafe {d.get_unchecked(i-1).get_unchecked(j)} + 1;
-                //let insertion_distance = d[i][j-1] + 1;
-                let insertion_distance = unsafe {d.get_unchecked(i).get_unchecked(j-1)} + 1;
-                //let substitution_distance = d[i-1][j-1] + substitution_cost;
-                let substitution_distance = unsafe {d.get_unchecked(i-1).get_unchecked(j-1)} + substitution_cost;
-
-                let smallest_distance = min(min(deletion_distance, insertion_distance), substitution_distance);
-                
-                //d[i][j] = smallest_distance;  
-                let element = unsafe{ d.get_unchecked_mut(i).get_unchecked_mut(j) };
-                *element = smallest_distance;
-            }
-        }
-
-        DistanceT::from(d[m-1][n-1])
-    }
-}
-
-pub const DEFAULT_UTF8_TABLE : TableConfig<char, u8, String, true> = TableConfig {
-    max_deletes : 2,
-    meaningful_key_len : 12,
-    group_variant_overlap_threshold : 5,
-    distance_function : TableConfig::<char, u8, String, true>::edit_distance,
-    phantom_key : PhantomData,
-    phantom_distance : PhantomData,
-    phantom_value : PhantomData,
-};
 
 /// Performance counters for optimizing [Table] parameters.
 /// 
@@ -375,85 +242,6 @@ impl PerfCounters {
     }
 }
 
-/// A unique identifier for a record within a [Table]
-/// 
-/// NOTE: although the RecordID is 64 bits, only 44 bits can be used to address
-/// records, giving a theoretical maximum of 17.6 trillion records although
-/// this crate has only been tested with about 10 million unique records, so far
-#[derive(Copy, Debug, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, derive_more::Display, Serialize, Deserialize)]
-pub struct RecordID(usize);
-impl RecordID {
-    pub const NULL : RecordID = RecordID(usize::MAX);
-}
-
-/// A unique identifier for a key group, which includes its RecordID
-/// 
-/// Lower 44 bits are the RecordID, upper 20 bits are the GroupID
-#[derive(Copy, Debug, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, derive_more::Display, Serialize, Deserialize)]
-struct KeyGroupID(usize);
-impl KeyGroupID {
-    fn from_record_and_idx(record_id : RecordID, group_idx : usize) -> Self {
-        //Panic if we have more than the allowed number of records
-        if record_id.0 > 0xFFFFFFFFFFF {
-            panic!("too many records!");
-        }
-        let record_component = record_id.0 & 0xFFFFFFFFFFF;
-        let group_component = group_idx << 44;
-        Self(record_component + group_component)
-    }
-    fn record_id(&self) -> RecordID {
-        RecordID(self.0 & 0xFFFFFFFFFFF)
-    }
-    fn group_idx(&self) -> usize {
-        self.0 >> 44
-    }
-}
-
-/// Some meta-data associated with each record
-#[derive(Serialize, Deserialize)]
-struct RecordData {
-    key_groups : Vec<usize>,
-    //DANGER: If any additional fields are added here, we must update `put_key_groups` to preserve
-    // other fields before just overwriting it.
-}
-
-impl RecordData {
-    fn new(key_groups : &[usize]) -> Self {
-        Self{
-            key_groups : key_groups.to_vec()
-        }
-    }
-}
-
-/// A transient struct to keep track of the multiple key groups, reflecting what's in the DB.
-/// Used when assembling key groups or adding new keys to existing groups
-#[derive(Clone)]
-struct KeyGroups<OwnedKeyT> {
-    variant_reverse_lookup_map : HashMap<Vec<u8>, usize>,
-    key_group_variants : Vec<HashSet<Vec<u8>>>,
-    key_group_keys : Vec<HashSet<OwnedKeyT>>,
-    group_ids : Vec<usize> //The contents of this vec correspond to the KeyGroupID
-}
-
-impl <OwnedKeyT>KeyGroups<OwnedKeyT> {
-    fn new() -> Self {
-        Self{
-            variant_reverse_lookup_map : HashMap::new(),
-            key_group_variants : vec![],
-            key_group_keys : vec![],
-            group_ids : vec![]
-        }
-    }
-    fn next_available_group_id(&self) -> usize {
-        //It doesn't matter if we leave some holes, but we must not collide, therefore we'll
-        //start at the length of the vec, and search forward from there
-        let mut group_id = self.group_ids.len();
-        while self.group_ids.contains(&group_id) {
-            group_id += 1;
-        }
-        group_id
-    }
-}
 
 /// A private trait implemented by a [Table] to provide access to the keys in the DB, 
 /// whether they are UTF-8 encoded strings or arrays of KeyCharT
@@ -535,15 +323,6 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     }
 }
 
-
-/// The maximum number of characters allowable in a key.  Longer keys will cause an error
-pub const MAX_KEY_LENGTH : usize = 95;
-
-const KEYS_CF_NAME : &str = "keys";
-const RECORD_DATA_CF_NAME : &str = "rec_data";
-const VALUES_CF_NAME : &str = "values";
-const VARIANTS_CF_NAME : &str = "variants";
-
 /// The implementation of the shared parts of Table
 impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::DeserializeOwned, DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, ValueT : 'static + Serialize + serde::de::DeserializeOwned, const UTF8_KEYS : bool>Table<KeyCharT, DistanceT, ValueT, UTF8_KEYS>
     where Self : TableKeyEncoding<KeyCharT> {
@@ -558,34 +337,16 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     /// unwrapped RocksDB error.
     pub fn new(path : &str, config : TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>) -> Result<Self, String> {
 
-        //Configure the "keys" and "values" column families
-        let keys_cf = ColumnFamilyDescriptor::new(KEYS_CF_NAME, rocksdb::Options::default());
-        let rec_data_cf = ColumnFamilyDescriptor::new(RECORD_DATA_CF_NAME, rocksdb::Options::default());
-        let values_cf = ColumnFamilyDescriptor::new(VALUES_CF_NAME, rocksdb::Options::default());
+        //Open the Database
+        let db = DBConnection::new(path)?;
 
-        //Configure the "variants" column family
-        let mut variants_opts = rocksdb::Options::default();
-        variants_opts.create_if_missing(true);
-        variants_opts.set_merge_operator_associative("append to RecordID vec", Self::variant_append_merge);
-        let variants_cf = ColumnFamilyDescriptor::new(VARIANTS_CF_NAME, variants_opts);
-
-        //Configure the database itself
-        let mut db_opts = rocksdb::Options::default();
-        db_opts.create_missing_column_families(true);
-        db_opts.create_if_missing(true);
-
-        //Open the database
-        let db = DB::open_cf_descriptors(&db_opts, path, vec![keys_cf, rec_data_cf, values_cf, variants_cf])?;
-
-        //Find the maximum RecordID, by probing the entries in the "rec_data" column family
-        let rec_data_cf_handle = db.cf_handle(RECORD_DATA_CF_NAME).unwrap();
-        let record_count = probe_for_max_sequential_key(&db, rec_data_cf_handle, 255)?;
+        //Find the next value for new RecordIDs, by probing the entries in the "rec_data" column family
+        let record_count = db.record_count()?;
 
         Ok(Self {
             record_count,
             config : config,
             db,
-            path : path.to_string(),
             deleted_records : vec![],
             #[cfg(feature = "perf_counters")]
             perf_counters : Cell::new(PerfCounters::new()),
@@ -598,23 +359,9 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     /// 
     /// (Dropping in a database sense, not a Rust sense)
     pub fn reset(&mut self) -> Result<(), String> {
-        
-        //Drop all the existing column families
-        self.db.drop_cf(KEYS_CF_NAME)?;
-        self.db.drop_cf(RECORD_DATA_CF_NAME)?;
-        self.db.drop_cf(VALUES_CF_NAME)?;
-        self.db.drop_cf(VARIANTS_CF_NAME)?;
 
-        //Recreate the "keys", "rec_data", and "values" column families
-        self.db.create_cf(KEYS_CF_NAME, &rocksdb::Options::default())?;
-        self.db.create_cf(RECORD_DATA_CF_NAME, &rocksdb::Options::default())?;
-        self.db.create_cf(VALUES_CF_NAME, &rocksdb::Options::default())?;
-        
-        //Recreate the "variants" column family
-        let mut variants_opts = rocksdb::Options::default();
-        variants_opts.create_if_missing(true);
-        variants_opts.set_merge_operator_associative("append to RecordID vec", Self::variant_append_merge);
-        self.db.create_cf(VARIANTS_CF_NAME, &variants_opts)?;
+        //Reset the database
+        self.db.reset_database()?;
 
         //Reset the record_count, so newly inserted entries begin at 0 again
         self.record_count = 0;
@@ -628,7 +375,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     pub fn delete(&mut self, record_id : RecordID) -> Result<(), String> {
 
         self.delete_keys_internal(record_id)?;
-        self.delete_value_internal(record_id)?;
+        self.db.delete_value(record_id)?;
         self.deleted_records.push(record_id);
 
         Ok(())
@@ -641,10 +388,10 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     fn delete_keys_internal(&mut self, record_id : RecordID) -> Result<(), String> {
 
         //Get all of the key-groups belonging to the record
-        for key_group in self.get_key_groups(record_id)? {
+        for key_group in self.db.get_record_key_groups(record_id)? {
 
             //Get all the keys for the group we're removing, so we can compute all the variants
-            let keys_iter = self.get_keys_in_group(key_group)?;
+            let keys_iter = self.db.get_keys_in_group::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>(key_group)?;
             let mut variants = HashSet::new();
             for key in keys_iter {
                 let key_variants = self.variants(&key);
@@ -652,74 +399,16 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
             }
 
             //Remove the variants' reference to this key group
-            self.delete_variants_internal(key_group, variants)?;
+            self.db.delete_variant_references(key_group, variants)?;
             
             //Delete the key group entry in the table
-            self.delete_key_group_entry(key_group)?;
+            self.db.delete_key_group_entry(key_group)?;
         }
 
         //Now replace the key groups vec in the "rec_data" table with an empty sentinel vec
         //NOTE: We replace the record rather than delete it because we assume there are no gaps in the
         // RecordIDs, when assigning new a RecordID
-        self.put_key_groups(record_id, &[])?;
-
-        Ok(())
-    }
-
-    /// Deletes a key group entry from the db.  Does not clean up variants that may reference
-    /// the key group, so must be called as part of another operation
-    fn delete_key_group_entry(&mut self, key_group : KeyGroupID) -> Result<(), String> {
-        
-        let keys_cf_handle = self.db.cf_handle(KEYS_CF_NAME).unwrap();
-        self.db.delete_cf(keys_cf_handle, key_group.0.to_le_bytes())?;
-
-        Ok(())
-    }
-
-    fn delete_variants_internal(&mut self, key_group : KeyGroupID, variants : HashSet<Vec<u8>>) -> Result<(), String> {
-        
-        //Loop over each variant, and remove the KeyGroupID from its associated variant entry in
-        // the database, and remove the variant entry if it only referenced the key_group we're removing
-        let variants_cf_handle = self.db.cf_handle(VARIANTS_CF_NAME).unwrap();
-        for variant in variants.iter() {
-
-            if let Some(variant_entry_bytes) = self.db.get_pinned_cf(variants_cf_handle, variant)? {
-
-                let variant_entry_len = bincode_vec_fixint_len(&variant_entry_bytes);
-
-                //If the variant entry references more than one record, rebuild it with our records absent
-                if variant_entry_len > 1 {
-                    let mut new_vec : Vec<KeyGroupID> = Vec::with_capacity(variant_entry_len-1);
-                    for key_group_id_bytes in bincode_vec_iter::<KeyGroupID>(&variant_entry_bytes) {
-                        let other_key_group_id = KeyGroupID(usize::from_le_bytes(key_group_id_bytes.try_into().unwrap()));
-                        if other_key_group_id != key_group {
-                            new_vec.push(other_key_group_id);
-                        }
-                    }
-                    let vec_coder = bincode::DefaultOptions::new().with_fixint_encoding().with_little_endian();
-                    self.db.put_cf(variants_cf_handle, variant, vec_coder.serialize(&new_vec).unwrap())?;
-                } else {
-                    //Otherwise, remove the variant entry entirely
-                    self.db.delete_cf(variants_cf_handle, variant)?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Creates entries in the keys table.  If we are updating an old record, we will overwrite it.
-    /// 
-    /// NOTE: This function will NOT update any variants used to locate the key
-    fn put_key_group_internal<K : Eq + Hash + Serialize>(&mut self, key_group_id : KeyGroupID, raw_keys : &HashSet<K>) -> Result<(), String> {
-        
-        //Serialize the keys into a vec of bytes
-        let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
-        let keys_bytes = record_coder.serialize(&raw_keys).unwrap();
-
-        //Put the vector of keys into the keys table
-        let keys_cf_handle = self.db.cf_handle(KEYS_CF_NAME).unwrap();
-        self.db.put_cf(keys_cf_handle, usize::to_le_bytes(key_group_id.0), keys_bytes)?;
+        self.db.put_record_key_groups(record_id, &[])?;
 
         Ok(())
     }
@@ -736,19 +425,21 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
         //Put the variants for each group into the right table
         for (idx, variant_set) in groups.key_group_variants.into_iter().enumerate() {
             let key_group_id = KeyGroupID::from_record_and_idx(record_id, idx); 
-            self.put_variants_internal(key_group_id, variant_set)?;
+            self.db.put_variant_references(key_group_id, variant_set)?;
         }
         
         //Put the keys for each group into the table
         for (idx, key_set) in groups.key_group_keys.into_iter().enumerate() {
             let key_group_id = KeyGroupID::from_record_and_idx(record_id, idx); 
-            self.put_key_group_internal(key_group_id, &key_set)?;
+            self.db.put_key_group_entry(key_group_id, &key_set)?;
         }
 
         //Put the key group record into the rec_data table
         let group_indices : Vec<usize> = (0..num_groups).into_iter().collect();
-        self.put_key_groups(record_id, &group_indices[..])
+        self.db.put_record_key_groups(record_id, &group_indices[..])
     }
+
+//GOAT BEGIN SNIP, move to key_groups module
 
     /// Adds a new key to a KeyGroups transient structure.  Doesn't touch the DB
     /// 
@@ -862,13 +553,13 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
         let mut groups = KeyGroups::new();
 
         //Load the group indices from the rec_data table and loop over each key group
-        for (group_idx, key_group) in self.get_key_groups(record_id)?.enumerate() {
+        for (group_idx, key_group) in self.db.get_record_key_groups(record_id)?.enumerate() {
 
             let mut group_keys = HashSet::new();
             let mut group_variants = HashSet::new();
 
             //Load the group's keys and loop over each one
-            for key in self.get_keys_in_group(key_group)? {
+            for key in self.db.get_keys_in_group::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>(key_group)? {
 
                 //Compute the variants for the key, and merge them into the group variants
                 let key_variants = self.variants(&key);
@@ -893,19 +584,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
         Ok(groups)
     }
 
-    /// Adds the KeyGroupID to each of the supplied variants
-    fn put_variants_internal(&mut self, key_group : KeyGroupID, variants : HashSet<Vec<u8>>) -> Result<(), String> {
-
-        //Add the key_group to each variant
-        let variants_cf_handle = self.db.cf_handle(VARIANTS_CF_NAME).unwrap();
-        for variant in variants {
-            //TODO: Benchmark using merge_cf() against using a combination of get_pinned_cf() and put_cf()
-            let val_bytes = Self::new_variant_vec(key_group);
-            self.db.merge_cf(variants_cf_handle, variant, val_bytes)?;
-        }
-
-        Ok(())
-    }
+//GOAT END SNIP
 
     /// Add additional keys to a record, including creation of all associated variants
     fn add_keys_internal<'a, K : Key<KeyCharT> + 'a, KeysIterT : Iterator<Item=&'a K>>(&mut self, record_id : RecordID, keys_iter : KeysIterT, num_keys : usize) -> Result<(), String> {
@@ -943,15 +622,15 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
 
             //Add the key_group_id to the appropriate entries for each of the new variants
             let key_group_id = KeyGroupID::from_record_and_idx(record_id, groups.group_ids[group_idx]);
-            self.put_variants_internal(key_group_id, unique_keys_variants)?;
+            self.db.put_variant_references(key_group_id, unique_keys_variants)?;
 
             //Add the new keys to the key group's entry in the keys table by replacing the keys vector
             // with the superset
-            self.put_key_group_internal(key_group_id, keys_set)?;
+            self.db.put_key_group_entry(key_group_id, keys_set)?;
         }
 
         //Put the new rec_data entry, to reflect all the associated key groups
-        self.put_key_groups(record_id, &groups.group_ids[..])
+        self.db.put_record_key_groups(record_id, &groups.group_ids[..])
     }
 
     /// Removes the specified keys from the keys associated with a record
@@ -961,7 +640,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     fn remove_keys_internal<K : Key<KeyCharT>>(&mut self, record_id : RecordID, remove_keys : &HashSet<&K>) -> Result<(), String> {
 
         //Get all of the existing groups
-        let group_ids : Vec<KeyGroupID> = self.get_key_groups(record_id)?.collect();
+        let group_ids : Vec<KeyGroupID> = self.db.get_record_key_groups(record_id)?.collect();
 
         //Go through each existing group, and build a HashSet containing the keys that
         // we will delete and the keys that will remain after the removal
@@ -971,7 +650,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
         for key_group in group_ids.iter() {
             let mut deleted_keys = HashSet::new();
             let mut remaining_keys = HashSet::new();
-            for existing_key in self.get_keys_in_group(*key_group)? {
+            for existing_key in self.db.get_keys_in_group::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>(*key_group)? {
 
                 //NOTE: We know this is safe because the unsafety comes from the fact that
                 // query_key might borrow existing_key, which is temporary, while query_key's
@@ -1031,22 +710,22 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
             }
 
             //Delete our KeyGroupID from each variant's list, and remove the variant list if we made it empty
-            self.delete_variants_internal(group_id, unique_keys_variants)?;
+            self.db.delete_variant_references(group_id, unique_keys_variants)?;
 
             //Update or delete the group
             if remaining_group_keys_sets[idx].len() == 0 {
                 //Delete the group's keys record if we made the group empty
-                self.delete_key_group_entry(group_id)?;
+                self.db.delete_key_group_entry(group_id)?;
             } else {
                 //Otherwise update the group's keys record
-                self.put_key_group_internal(group_id, &remaining_group_keys_sets[idx])?;
+                self.db.put_key_group_entry(group_id, &remaining_group_keys_sets[idx])?;
                 remaining_group_indices.push(group_id.group_idx());
             }
             
         }
 
         //Update the record's rec_data entry to reflect the new groups after deletion
-        self.put_key_groups(record_id, &remaining_group_indices[..])
+        self.db.put_record_key_groups(record_id, &remaining_group_indices[..])
     }
 
     /// Replaces all of the keys in a record with the supplied keys
@@ -1066,33 +745,6 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
         self.put_record_keys(record_id, keys.into_iter(), keys.len())
     }
 
-    /// Deletes a record's value in the values table
-    /// 
-    /// This should only be called as part of another operation as it leaves the record in an
-    /// inconsistent state
-    fn delete_value_internal(&mut self, record_id : RecordID) -> Result<(), String> {
-
-        let value_cf_handle = self.db.cf_handle(VALUES_CF_NAME).unwrap();
-        self.db.delete_cf(value_cf_handle, usize::to_le_bytes(record_id.0))?;
-
-        Ok(())
-    }
-
-    /// Creates entries in the values table
-    /// If we are updating an old record, we will overwrite it.
-    /// 
-    /// NOTE: This function will NOT update any variants used to locate the key
-    fn put_value_internal(&mut self, record_id : RecordID, value : &ValueT) -> Result<(), String> {
-        
-        //Serialize the value and put it in the values table.
-        let value_cf_handle = self.db.cf_handle(VALUES_CF_NAME).unwrap();
-        let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
-        let value_bytes = record_coder.serialize(value).unwrap();
-        self.db.put_cf(value_cf_handle, usize::to_le_bytes(record_id.0), value_bytes)?;
-
-        Ok(())
-    }
-
     /// Replaces a record's value with the supplied value.  Returns the value that was replaced
     /// 
     /// The supplied `record_id` must references an existing record that has not been deleted.
@@ -1101,9 +753,9 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     /// unwrapped RocksDB error.
     pub fn replace_value(&mut self, record_id : RecordID, value : &ValueT) -> Result<ValueT, String> {
 
-        let old_value = self.get_value(record_id)?;
+        let old_value = self.db.get_value(record_id)?;
 
-        self.put_value_internal(record_id, value)?;
+        self.db.put_value(record_id, value)?;
 
         Ok(old_value)
     }
@@ -1122,7 +774,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
         let new_record_id = match self.deleted_records.pop() {
             None => {
                 //We'll be creating a new record, so get the next unique record_id
-                let new_record_id = RecordID(self.record_count);
+                let new_record_id = RecordID::from(self.record_count);
                 self.record_count += 1;
                 new_record_id
             },
@@ -1133,7 +785,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
         self.put_record_keys(new_record_id, keys_iter, num_keys)?;
 
         //Put the value into its appropriate table
-        self.put_value_internal(new_record_id, value)?;
+        self.db.put_value(new_record_id, value)?;
 
         Ok(new_record_id)
     }
@@ -1155,30 +807,24 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
         let variants = self.variants(key);
 
         //Check to see if we have entries in the "variants" database for any of the key variants
-        let variants_cf_handle = self.db.cf_handle(VARIANTS_CF_NAME).unwrap();
-        for variant in variants {
-            // See if we have an entry in the variants database
-            if let Some(variant_vec_bytes) = self.db.get_pinned_cf(variants_cf_handle, variant)? {
+        self.db.visit_variants(variants, |variant_vec_bytes| {
 
-                #[cfg(feature = "perf_counters")]
-                {
-                    let num_key_group_ids = bincode_vec_fixint_len(&variant_vec_bytes);
-                    let mut perf_counters = self.perf_counters.get();
-                    perf_counters.variant_load_count += 1;
-                    if perf_counters.max_variant_entry_refs < num_key_group_ids {
-                        perf_counters.max_variant_entry_refs = num_key_group_ids;
-                    }
-                    self.perf_counters.set(perf_counters);
+            #[cfg(feature = "perf_counters")]
+            {
+                let num_key_group_ids = bincode_vec_fixint_len(variant_vec_bytes);
+                let mut perf_counters = self.perf_counters.get();
+                perf_counters.variant_load_count += 1;
+                if perf_counters.max_variant_entry_refs < num_key_group_ids {
+                    perf_counters.max_variant_entry_refs = num_key_group_ids;
                 }
-        
-                // Call the visitor for each KeyGroup we found
-                for key_group_id_bytes in bincode_vec_iter::<KeyGroupID>(&variant_vec_bytes) {
-                    visitor(KeyGroupID(usize::from_le_bytes(key_group_id_bytes.try_into().unwrap())));
-                }
+                self.perf_counters.set(perf_counters);
             }
-        }
-
-        Ok(())
+    
+            // Call the visitor for each KeyGroup we found
+            for key_group_id_bytes in bincode_vec_iter::<KeyGroupID>(variant_vec_bytes) {
+                visitor(KeyGroupID::from(usize::from_le_bytes(key_group_id_bytes.try_into().unwrap())));
+            }
+        })
     }
 
     fn lookup_fuzzy_raw_internal<K : Key<KeyCharT>>(&self, key : &K) -> Result<impl Iterator<Item=RecordID>, String> {
@@ -1238,7 +884,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
             if !visited_groups.contains(&key_group_id) {
 
                 //Check the record's keys with the distance function and find the smallest distance
-                let mut record_keys_iter = self.get_keys_in_group(key_group_id).unwrap().into_iter();
+                let mut record_keys_iter = self.db.get_keys_in_group::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>(key_group_id).unwrap().into_iter();
                 let record_key = record_keys_iter.next().unwrap(); //If we have a zero-element keys array, it's a bug elsewhere, so this unwrap should always succeed
                 let record_key_chars = Self::owned_key_into_buf(&record_key, &mut key_chars_buf);
                 let mut smallest_distance = distance_function(&record_key_chars[..], &looup_key_chars[..]); 
@@ -1321,14 +967,14 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
         let meaningful_noop = meaningful_key.num_chars() == lookup_key_len;
 
         //Get the variant for our meaningful_key
-        let variants_cf_handle = self.db.cf_handle(VARIANTS_CF_NAME).unwrap();
-        if let Some(variant_vec_bytes) = self.db.get_pinned_cf(variants_cf_handle, meaningful_key.as_bytes())? {
+        let mut record_ids : Vec<RecordID> = vec![];
+        self.db.visit_exact_variant(meaningful_key.as_bytes(), |variant_vec_bytes| {
 
-            let record_ids : Vec<RecordID> = if meaningful_noop {
+            record_ids = if meaningful_noop {
 
                 //If the meaningful_key exactly equals our key, we can just return the variant's results
                 bincode_vec_iter::<KeyGroupID>(&variant_vec_bytes).map(|key_group_id_bytes| {
-                    KeyGroupID(usize::from_le_bytes(key_group_id_bytes.try_into().unwrap()))
+                    KeyGroupID::from(usize::from_le_bytes(key_group_id_bytes.try_into().unwrap()))
                 }).map(|key_group_id| key_group_id.record_id()).collect()
 
             } else {
@@ -1338,10 +984,10 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
                 let owned_lookup_key = Self::owned_key_from_key(lookup_key);
                 bincode_vec_iter::<KeyGroupID>(&variant_vec_bytes)
                 .filter_map(|key_group_id_bytes| {
-                    let key_group_id = KeyGroupID(usize::from_le_bytes(key_group_id_bytes.try_into().unwrap()));
+                    let key_group_id = KeyGroupID::from(usize::from_le_bytes(key_group_id_bytes.try_into().unwrap()));
                     
                     // Return only the KeyGroupIDs for records if their keys match the key we are looking up
-                    let mut keys_iter = self.get_keys_in_group(key_group_id).ok()?;
+                    let mut keys_iter = self.db.get_keys_in_group::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>(key_group_id).ok()?;
                     if keys_iter.any(|key| key == owned_lookup_key) {
                         Some(key_group_id)
                     } else {
@@ -1349,14 +995,48 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
                     }
                 }).map(|key_group_id| key_group_id.record_id()).collect()
             };
+        })?;
 
-            Ok(record_ids)
+        Ok(record_ids)
 
-        } else {
+        // // GOAT Old implementation, in case we decide it is faster (I'm pretty sure it isn't)
+        // //Get the variant for our meaningful_key
+        // let variants_cf_handle = self.db.db.cf_handle(VARIANTS_CF_NAME).unwrap();
+        // if let Some(variant_vec_bytes) = self.db.db.get_pinned_cf(variants_cf_handle, meaningful_key.as_bytes())? {
 
-            //No variant found, so return an empty Iterator
-            Ok(vec![])
-        }
+        //     let record_ids : Vec<RecordID> = if meaningful_noop {
+
+        //         //If the meaningful_key exactly equals our key, we can just return the variant's results
+        //         bincode_vec_iter::<KeyGroupID>(&variant_vec_bytes).map(|key_group_id_bytes| {
+        //             KeyGroupID::from(usize::from_le_bytes(key_group_id_bytes.try_into().unwrap()))
+        //         }).map(|key_group_id| key_group_id.record_id()).collect()
+
+        //     } else {
+
+        //         //But if they are different, we need to Iterate every KeyGroupID in the variant in order
+        //         //  to check if we really have a match on the whole key
+        //         let owned_lookup_key = Self::owned_key_from_key(lookup_key);
+        //         bincode_vec_iter::<KeyGroupID>(&variant_vec_bytes)
+        //         .filter_map(|key_group_id_bytes| {
+        //             let key_group_id = KeyGroupID::from(usize::from_le_bytes(key_group_id_bytes.try_into().unwrap()));
+                    
+        //             // Return only the KeyGroupIDs for records if their keys match the key we are looking up
+        //             let mut keys_iter = self.db.get_keys_in_group::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>(key_group_id).ok()?;
+        //             if keys_iter.any(|key| key == owned_lookup_key) {
+        //                 Some(key_group_id)
+        //             } else {
+        //                 None
+        //             }
+        //         }).map(|key_group_id| key_group_id.record_id()).collect()
+        //     };
+
+        //     Ok(record_ids)
+
+        // } else {
+
+        //     //No variant found, so return an empty Iterator
+        //     Ok(vec![])
+        // }
     }
 
     /// Returns the value associated with the specified record
@@ -1364,17 +1044,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn get_value(&self, record_id : RecordID) -> Result<ValueT, String> {
-
-        //Get the value object by deserializing the bytes from the db
-        let values_cf_handle = self.db.cf_handle(VALUES_CF_NAME).unwrap();
-        if let Some(value_bytes) = self.db.get_pinned_cf(values_cf_handle, record_id.0.to_le_bytes())? {
-            let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
-            let value : ValueT = record_coder.deserialize(&value_bytes).unwrap();
-
-            Ok(value)
-        } else {
-            Err("Invalid record_id".to_string())
-        }
+        self.db.get_value(record_id)
     }
 
     /// Returns the number of keys associated with a specified record
@@ -1383,136 +1053,20 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
         let mut keys_count = 0;
 
         //Go over every key group associated with the record
-        for key_group in self.get_key_groups(record_id)? {
-
-            let keys_cf_handle = self.db.cf_handle(KEYS_CF_NAME).unwrap();
-            if let Some(keys_vec_bytes) = self.db.get_pinned_cf(keys_cf_handle, key_group.0.to_le_bytes())? {
-    
-                //The vector element count should be the first encoded usize
-                let mut skip_bytes = 0;
-                let group_keys_count = bincode_u64_le_varint(&keys_vec_bytes, &mut skip_bytes);
-    
-                keys_count += group_keys_count;
-            } else {
-                panic!(); //If we hit this, we have a corrupt DB
-            }
+        for key_group in self.db.get_record_key_groups(record_id)? {
+            keys_count += self.db.keys_count_in_group(key_group)?;
         }
 
         Ok(keys_count as usize)
     }
 
-    /// Returns an iterator for every key group associated with a specified record
-    fn get_key_groups(&self, record_id : RecordID) -> Result<impl Iterator<Item=KeyGroupID>, String> {
-
-        let rec_data_cf_handle = self.db.cf_handle(RECORD_DATA_CF_NAME).unwrap();
-        if let Some(rec_data_vec_bytes) = self.db.get_pinned_cf(rec_data_cf_handle, record_id.0.to_le_bytes())? {
-            let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
-            let rec_data : RecordData = record_coder.deserialize(&rec_data_vec_bytes).unwrap();
-
-            if rec_data.key_groups.len() > 0 {
-                Ok(rec_data.key_groups.into_iter().map(move |group_idx| KeyGroupID::from_record_and_idx(record_id, group_idx)))
-            } else {
-                Err("Invalid record_id".to_string())
-            }
-        } else {
-            Err("Invalid record_id".to_string())
-        }
-    }
-
-    /// Replaces the key groups in the specified record with the provided vec
-    fn put_key_groups(&self, record_id : RecordID, key_groups_vec : &[usize]) -> Result<(), String> {
-
-        //Create the RecordData, serialize it, and put in into the rec_data table.
-        let rec_data_cf_handle = self.db.cf_handle(RECORD_DATA_CF_NAME).unwrap();
-        let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
-        let new_rec_data = RecordData::new(key_groups_vec);
-        let rec_data_bytes = record_coder.serialize(&new_rec_data).unwrap();
-        self.db.put_cf(rec_data_cf_handle, usize::to_le_bytes(record_id.0), rec_data_bytes)?;
-
-        Ok(())
-    }
-
     /// Returns all of the keys for a record, across all key groups
     fn get_keys_internal<'a>(&'a self, record_id : RecordID) -> Result<impl Iterator<Item=<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT> + 'a, String> {
 
-        let key_groups_iter = self.get_key_groups(record_id)?;
-        let result_iter = key_groups_iter.flat_map(move |key_group| self.get_keys_in_group(key_group).unwrap());
+        let key_groups_iter = self.db.get_record_key_groups(record_id)?;
+        let result_iter = key_groups_iter.flat_map(move |key_group| self.db.get_keys_in_group::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>(key_group).unwrap());
 
         Ok(result_iter)
-    }
-
-    /// Returns the keys associated with a single key group of a single specified record
-    fn get_keys_in_group(&self, key_group : KeyGroupID) -> Result<impl Iterator<Item=<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>, String> {
-
-        //Get the keys vec by deserializing the bytes from the db
-        let keys_cf_handle = self.db.cf_handle(KEYS_CF_NAME).unwrap();
-        if let Some(keys_vec_bytes) = self.db.get_pinned_cf(keys_cf_handle, key_group.0.to_le_bytes())? {
-            let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
-            let keys_vec : Vec<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT> = record_coder.deserialize(&keys_vec_bytes).unwrap();
-
-            #[cfg(feature = "perf_counters")]
-            {
-                let mut perf_counters = self.perf_counters.get();
-                perf_counters.key_group_lookup_count += 1;
-                perf_counters.keys_found_count += keys_vec.len();
-                self.perf_counters.set(perf_counters);
-            }    
-
-            if keys_vec.len() > 0 {
-                Ok(keys_vec.into_iter())
-            } else {
-                Err("Invalid record_id".to_string())
-            }
-        } else {
-            Err("Invalid record_id".to_string())
-        }
-    }
-
-    // Creates a Vec<KeyGroupID> with one entry, serialized out as a string of bytes
-    fn new_variant_vec(key_group : KeyGroupID) -> Vec<u8> {
-
-        //Create a new vec and Serialize it out
-        let new_vec = vec![key_group];
-        let vec_coder = bincode::DefaultOptions::new().with_fixint_encoding().with_little_endian();
-        vec_coder.serialize(&new_vec).unwrap()
-    }
-
-    // The function to add a new entry for a variant in the database, formulated as a RocksDB callback
-    fn variant_append_merge(_key: &[u8], existing_val: Option<&[u8]>, operands: &mut MergeOperands) -> Option<Vec<u8>> {
-
-        // Note: I've seen this function be called at odd times by RocksDB, such as when a DB is
-        // opened.  I haven't been able to get a straight answer on why RocksDB calls this function
-        // unnecessarily, but it doesn't seem to be hurting performance much.
-
-        //TODO: Status prints in this function to understand the behavior of RocksDB.
-        // Remove them when this is understood.
-        // println!("Append-Called {:?}", std::str::from_utf8(key).unwrap());
-        let vec_coder = bincode::DefaultOptions::new().with_fixint_encoding().with_little_endian();
-
-        //Deserialize the existing database entry into a vec of KeyGroupIDs
-        //NOTE: we're actually using a HashSet because we don't want any duplicates
-        let mut variant_vec = if let Some(existing_bytes) = existing_val {
-            let new_vec : HashSet<KeyGroupID> = vec_coder.deserialize(existing_bytes).unwrap();
-            new_vec
-        } else {
-            //TODO: Remove status println!()
-            // println!("MERGE WITH NONE!!");
-            HashSet::with_capacity(operands.size_hint().0)
-        };
-
-        //Add the new KeyGroupID(s)
-        for op in operands {
-            //Deserialize the vec on the operand, and merge its entries into the existing vec
-            let operand_vec : HashSet<KeyGroupID> = vec_coder.deserialize(op).unwrap();
-            variant_vec.extend(operand_vec);
-        }
-
-        //TODO: Remove status println!()
-        // println!("AppendResults {:?}", variant_vec);
-
-        //Serialize the vec back out again
-        let result = vec_coder.serialize(&variant_vec).unwrap();
-        Some(result)
     }
 
     // Returns the "meaningful" part of a key, that is used as the starting point to generate the variants
@@ -1884,66 +1438,6 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// unwrapped RocksDB error.
     pub fn lookup_best<'a>(&'a self, key : &'a [KeyCharT]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
         self.lookup_best_internal(&key)
-    }
-}
-
-impl <KeyCharT, DistanceT, ValueT, const UTF8_KEYS : bool>Drop for Table<KeyCharT, DistanceT, ValueT, UTF8_KEYS> {
-    fn drop(&mut self) {
-        //Close down Rocks
-        self.db.flush().unwrap();
-        let _ = DB::destroy(&rocksdb::Options::default(), self.path.as_str());
-    }
-}
-
-// Returns the usize that is one larger than the largest key, assuming the column family contains a
-// all of the smaller keys without any gaps.  If there are missing keys, the results are undefined.
-//
-// Implements a binary search through the possible keys, looking for the highest numbered key
-// This function should resolve one bit of the key, each time through the loop, so it should loop
-// at most 64 times for a 64 bit key, and likely much less because of the starting hint
-fn probe_for_max_sequential_key(db : &DBWithThreadMode<rocksdb::SingleThreaded>, cf : &ColumnFamily, starting_hint : usize) -> Result<usize, rocksdb::Error> {
-
-    let mut min = 0;
-    let mut max = usize::MAX;
-
-    //Need to adjust this constant so we don't risk overflow if we don't have 64-bit usize
-    debug_assert!(::std::mem::size_of::<usize>() == 8);
-    let mut guess_max = if starting_hint > 0xFFFFFFFF {
-        usize::MAX
-    } else if starting_hint < 1 {
-        1
-    } else {
-        starting_hint * starting_hint
-    };
-    
-    let mut cur_val = starting_hint;
-    loop {
-
-        //NOTE: this is an optimization to save one DB query at the cost of an extra test each loop
-        //The case where max == min will result in no hit and exit at the bottom of the loop body
-        if max == min {
-            return Ok(cur_val)
-        }
-
-        if let Some(_value) = db.get_pinned_cf(cf, cur_val.to_le_bytes())? {
-            //println!("Yes, cur_val = {}, min = {}, max = {}, guess_max = {}", cur_val, min, max, guess_max);
-            min = cur_val + 1;
-            if guess_max < max/2 {
-                guess_max *= 2;
-            } else {
-                guess_max = max;
-            }
-        } else {
-            //println!("No, cur_val = {}, min = {}, max = {}, guess_max = {}", cur_val, min, max, guess_max);
-            max = cur_val;
-            guess_max = max;
-
-            if max == min {
-                return Ok(cur_val)
-            }    
-        }
-
-        cur_val = ((guess_max - min) / 2) + min;
     }
 }
 
