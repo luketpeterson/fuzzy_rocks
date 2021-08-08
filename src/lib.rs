@@ -158,7 +158,6 @@
 //      detect an error when the config changes in a way that makes the database invalid
 
 use core::marker::PhantomData;
-use core::cmp::{Ordering};
 use core::hash::Hash;
 
 #[cfg(feature = "perf_counters")]
@@ -173,7 +172,6 @@ use std::convert::{TryInto};
 use std::iter::FromIterator;
 
 mod unicode_string_helpers;
-use unicode_string_helpers::{*};
 
 mod bincode_helpers;
 use bincode_helpers::{*};
@@ -193,6 +191,9 @@ pub use table_config::{TableConfig, MAX_KEY_LENGTH, DEFAULT_UTF8_TABLE};
 
 mod key_groups;
 use key_groups::{*};
+
+mod sym_spell;
+use sym_spell::{*};
 
 /// A collection containing records that may be searched by `key`
 /// 
@@ -242,85 +243,18 @@ impl PerfCounters {
     }
 }
 
-
 /// A private trait implemented by a [Table] to provide access to the keys in the DB, 
 /// whether they are UTF-8 encoded strings or arrays of KeyCharT
 //GOAT Move this to a private module
 pub trait TableKeyEncoding<KeyCharT> {
     type OwnedKeyT : OwnedKey<KeyCharT>;
-
-    fn owned_key_into_vec(key : Self::OwnedKeyT) -> Vec<KeyCharT>;
-    fn owned_key_into_buf<'a>(key : &'a Self::OwnedKeyT, buf : &'a mut Vec<KeyCharT>) -> &'a Vec<KeyCharT>;
-    fn owned_key_from_string(s : String) -> Self::OwnedKeyT;
-    fn owned_key_from_vec(v : Vec<KeyCharT>) -> Self::OwnedKeyT;
-    fn owned_key_from_key<K : Key<KeyCharT>>(k : &K) -> Self::OwnedKeyT;
 }
 
 impl <DistanceT, ValueT>TableKeyEncoding<char> for Table<char, DistanceT, ValueT, true> {
     type OwnedKeyT = String;
-    
-    fn owned_key_into_vec(key : Self::OwnedKeyT) -> Vec<char> {
-        //NOTE: 15% of the performance on the fuzzy lookups was taken with this function before I
-        // started optimizing and utimately switched over to owned_key_into_buf. It appeared that
-        // the buffer was being reallocated for each additional char for the collect() implementation.
-
-        //NOTE: Old implementation
-        // key.chars().collect()
-
-        //NOTE: It appears that this implementation is twice as fast as the collect() implementation,
-        // but we're still losing 7% of overall perf allocating and freeing this Vec, so I'm switching
-        // to owned_key_into_buf().
-        let num_chars = key.num_chars();
-        let mut result_vec = Vec::with_capacity(num_chars);
-        for the_char in key.chars() {
-            result_vec.push(the_char);
-        }
-        result_vec
-    }
-
-    fn owned_key_into_buf<'a>(key : &'a Self::OwnedKeyT, buf : &'a mut Vec<char>) -> &'a Vec<char> {
-
-        let mut num_chars = 0;
-        for (i, the_char) in key.chars().enumerate() {
-            let element = unsafe{ buf.get_unchecked_mut(i) };
-            *element = the_char;
-            num_chars = i;
-        }
-        unsafe{ buf.set_len(num_chars+1) };
-
-        buf
-    }
-
-    fn owned_key_from_string(s : String) -> Self::OwnedKeyT {
-        s
-    }
-    fn owned_key_from_vec(_v : Vec<char>) -> Self::OwnedKeyT {
-        panic!() //NOTE: Should never be called when the OwnedKeyT isn't a Vec
-    }
-    fn owned_key_from_key<K : Key<char>>(k : &K) -> Self::OwnedKeyT {
-        k.borrow_key_str().unwrap().to_string() //NOTE: the unwrap() will panic if called with the wrong kind of key
-    }
 }
 impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned, DistanceT, ValueT>TableKeyEncoding<KeyCharT> for Table<KeyCharT, DistanceT, ValueT, false> {
     type OwnedKeyT = Vec<KeyCharT>;
-    
-    fn owned_key_into_vec(key : Self::OwnedKeyT) -> Vec<KeyCharT> {
-        key
-    }
-
-    fn owned_key_into_buf<'a>(key : &'a Self::OwnedKeyT, _buf : &'a mut Vec<KeyCharT>) -> &'a Vec<KeyCharT> {
-        key
-    }
-
-    fn owned_key_from_string(_s : String) -> Self::OwnedKeyT {
-        panic!() //NOTE: Should never be called when the OwnedKeyT isn't a String
-    }
-    fn owned_key_from_vec(v : Vec<KeyCharT>) -> Self::OwnedKeyT {
-        v
-    }
-    fn owned_key_from_key<K : Key<KeyCharT>>(k : &K) -> Self::OwnedKeyT {
-        k.get_key_chars()
-    }
 }
 
 /// The implementation of the shared parts of Table
@@ -394,7 +328,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
             let keys_iter = self.db.get_keys_in_group::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>(key_group)?;
             let mut variants = HashSet::new();
             for key in keys_iter {
-                let key_variants = self.variants(&key);
+                let key_variants = SymSpell::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT, UTF8_KEYS>::variants(&key, &self.config);
                 variants.extend(key_variants);
             }
 
@@ -419,7 +353,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
     fn put_record_keys<'a, K : Key<KeyCharT> + 'a, KeysIterT : Iterator<Item=&'a K>>(&mut self, record_id : RecordID, keys_iter : KeysIterT, num_keys : usize) -> Result<(), String> {
     
         //Make groups for the keys
-        let groups = self.make_groups_from_keys(keys_iter, num_keys).unwrap();
+        let groups = KeyGroups::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT, UTF8_KEYS>::make_groups_from_keys(keys_iter, num_keys, &self.config).unwrap();
         let num_groups = groups.key_group_keys.len();
 
         //Put the variants for each group into the right table
@@ -439,159 +373,12 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
         self.db.put_record_key_groups(record_id, &group_indices[..])
     }
 
-//GOAT BEGIN SNIP, move to key_groups module
-
-    /// Adds a new key to a KeyGroups transient structure.  Doesn't touch the DB
-    /// 
-    /// This function is the owner of the decision whether or not to add a key to an existing
-    /// group or to create a new group for a key
-    fn add_key_to_groups<K : Key<KeyCharT>>(&self, key : &K, groups : &mut KeyGroups<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>, update_reverse_map : bool) -> Result<(), String> {
-        
-        //Make sure the key is within the maximum allowable MAX_KEY_LENGTH
-        if key.num_chars() > MAX_KEY_LENGTH {
-            return Err("key length exceeds MAX_KEY_LENGTH".to_string());
-        }
-
-        //Compute the variants for the key
-        let key_variants = self.variants(key);
-
-        //Variables that determine which group we merge into, or whether we create a new key group
-        let mut group_idx; //The index of the key group we'll merge this key into
-        let create_new_group;
-
-        //If we already have exactly this key as a variant, then we will add the key to that
-        // key group
-        if let Some(existing_group) = groups.variant_reverse_lookup_map.get(key.as_bytes()) {
-            group_idx = *existing_group;
-            create_new_group = false;
-        } else {
-
-            if self.config.group_variant_overlap_threshold > 0 {
-
-                //Count the number of overlapping variants the key has with each existing group
-                // NOTE: It's possible the variant_reverse_lookup_map doesn't capture all of the
-                // different groups containing a given variant.  This could happen if we chose not
-                // to merge variants for any reason, like exceeding a max number of keys in a key group,
-                // It could also happen if a variant set ends up overlapping two previously disjoint
-                // variant sets.  The only way to avoid that would be to merge the two existing key
-                // groups into a single key group, but we don't have logic to merge existing key groups,
-                // only to append new keys and the key's variants to a group.
-                // Since the whole key groups logic is just an optimization, this edge case will not
-                // affect the correctness of the results.
-                let mut overlap_counts : Vec<usize> = vec![0; groups.key_group_keys.len()];
-                for variant in key_variants.iter() {
-                    //See if it's already part of another key's variant list
-                    if let Some(existing_group) = groups.variant_reverse_lookup_map.get(&variant[..]) {
-                        overlap_counts[*existing_group] += 1;
-                    }
-                }
-
-                let (max_group_idx, max_overlaps) = overlap_counts.into_iter()
-                .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(Ordering::Equal))
-                .unwrap_or((0, 0));
-                group_idx = max_group_idx;
-                create_new_group = max_overlaps < self.config.group_variant_overlap_threshold; //Unless we have at least group_variant_overlap_threshold variant overlaps we'll make a new key group.
-
-            } else {
-                group_idx = 0;
-                create_new_group = groups.key_group_keys.len() == 0;
-            }
-        }
-
-        //Make a decision about whether to:
-        //A.) Use the key as the start of a new key group, or
-        //B.) Combine the key and its variant into an existing group
-        if create_new_group {
-            //A. We have no overlap with any existing group, so we will create a new group for this key
-            group_idx = groups.key_group_keys.len();
-            let mut new_set = HashSet::with_capacity(1);
-            new_set.insert(Self::owned_key_from_key(key));
-            groups.key_group_keys.push(new_set);
-            groups.key_group_variants.push(key_variants.clone());
-            //We can't count on the KeyGroupIDs not having holes so we need to use a function to
-            //find a unique ID.
-            let new_group_id = groups.next_available_group_id();
-            groups.group_ids.push(new_group_id);
-        } else {
-            //B. We will append the key to the existing group at group_index, and merge the variants
-            groups.key_group_keys[group_idx].insert(Self::owned_key_from_key(key));
-            groups.key_group_variants[group_idx].extend(key_variants.clone());
-        }
-
-        //If we're not at the last key in the list, add the variants to the variant_reverse_lookup_map
-        if update_reverse_map {
-            for variant in key_variants {
-                groups.variant_reverse_lookup_map.insert(variant, group_idx);
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Divides a list of keys up into one or more key groups based on some criteria; the primary
-    /// of which is the overlap between key variants.  Keys with more overlapping variants are more
-    /// likely to belong in the same group and keys with fewer or none are less likely.
-    fn make_groups_from_keys<'a, K : Key<KeyCharT> + 'a, KeysIterT : Iterator<Item=&'a K>>(&self, keys_iter : KeysIterT, num_keys : usize) -> Result<KeyGroups<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>, String> {
-
-        //Start with empty key groups, and add the keys one at a time
-        let mut groups = KeyGroups::new();
-        for (key_idx, key) in keys_iter.enumerate() {
-            let update_reverse_map = key_idx < num_keys-1;
-            self.add_key_to_groups(key, &mut groups, update_reverse_map)?;
-        }
-
-        Ok(groups)
-    }
-
-    /// Loads the existing key groups for a record in the [Table]
-    /// 
-    /// This function is used when adding new keys to a record, and figuring out which groups to
-    /// merge the keys into
-    fn load_key_groups(&self, record_id : RecordID) -> Result<KeyGroups<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>, String> {
-
-        let mut groups = KeyGroups::new();
-
-        //Load the group indices from the rec_data table and loop over each key group
-        for (group_idx, key_group) in self.db.get_record_key_groups(record_id)?.enumerate() {
-
-            let mut group_keys = HashSet::new();
-            let mut group_variants = HashSet::new();
-
-            //Load the group's keys and loop over each one
-            for key in self.db.get_keys_in_group::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>(key_group)? {
-
-                //Compute the variants for the key, and merge them into the group variants
-                let key_variants = self.variants(&key);
-
-                //Update the reverse_lookup_map with every variant
-                for variant in key_variants.iter() {
-                    groups.variant_reverse_lookup_map.insert(variant.clone(), group_idx);
-                }
-
-                //Push this key into the group's key list
-                group_keys.insert(key);
-
-                //Merge this key's variants with the other variants in this group
-                group_variants.extend(key_variants);
-            }
-
-            groups.key_group_variants.push(group_variants);
-            groups.key_group_keys.push(group_keys);
-            groups.group_ids.push(key_group.group_idx());
-        }
-
-        Ok(groups)
-    }
-
-//GOAT END SNIP
-
     /// Add additional keys to a record, including creation of all associated variants
     fn add_keys_internal<'a, K : Key<KeyCharT> + 'a, KeysIterT : Iterator<Item=&'a K>>(&mut self, record_id : RecordID, keys_iter : KeysIterT, num_keys : usize) -> Result<(), String> {
 
         //Get the record's existing key groups and variants, so we can figure out the
         //best places for each additional new key
-        let mut groups = self.load_key_groups(record_id)?;
+        let mut groups = KeyGroups::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT, UTF8_KEYS>::load_key_groups(&self.db, record_id, &self.config)?;
 
         //Clone the existing groups, so we can determine which variants were added where
         let existing_groups_variants = groups.key_group_variants.clone();
@@ -601,7 +388,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
         // the correct group or create a new group
         for (key_idx, key) in keys_iter.enumerate() {
             let update_reverse_index = key_idx < num_keys-1;
-            self.add_key_to_groups(key, &mut groups, update_reverse_index)?;
+            groups.add_key_to_groups(key, update_reverse_index, &self.config)?;
         }
 
         //Go over each group, work out the variants we need to add, then add them and update the group
@@ -691,14 +478,14 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
             //Compute all variants for the keys we're removing from this group
             let mut remove_keys_variants = HashSet::new();
             for remove_key in deleted_group_keys_sets[idx].iter() {
-                let keys_variants = self.variants(remove_key);
+                let keys_variants = SymSpell::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT, UTF8_KEYS>::variants(remove_key, &self.config);
                 remove_keys_variants.extend(keys_variants);
             }
 
             //Compute all the variants for the keys that must remain in the group
             let mut remaining_keys_variants = HashSet::new();
             for remaining_key in remaining_group_keys_sets[idx].iter() {
-                let keys_variants = self.variants(remaining_key);
+                let keys_variants = SymSpell::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT, UTF8_KEYS>::variants(remaining_key, &self.config);
                 remaining_keys_variants.extend(keys_variants);
             }
 
@@ -804,7 +591,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
         }
 
         //Create all of the potential variants based off of the "meaningful" part of the key
-        let variants = self.variants(key);
+        let variants = SymSpell::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT, UTF8_KEYS>::variants(key, &self.config);
 
         //Check to see if we have entries in the "variants" database for any of the key variants
         self.db.visit_variants(variants, |variant_vec_bytes| {
@@ -886,10 +673,10 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
                 //Check the record's keys with the distance function and find the smallest distance
                 let mut record_keys_iter = self.db.get_keys_in_group::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>(key_group_id).unwrap().into_iter();
                 let record_key = record_keys_iter.next().unwrap(); //If we have a zero-element keys array, it's a bug elsewhere, so this unwrap should always succeed
-                let record_key_chars = Self::owned_key_into_buf(&record_key, &mut key_chars_buf);
+                let record_key_chars = record_key.move_into_buf(&mut key_chars_buf);
                 let mut smallest_distance = distance_function(&record_key_chars[..], &looup_key_chars[..]); 
                 for record_key in record_keys_iter {
-                    let record_key_chars = Self::owned_key_into_buf(&record_key, &mut key_chars_buf);
+                    let record_key_chars = record_key.move_into_buf(&mut key_chars_buf);
                     let distance = distance_function(&record_key_chars, &looup_key_chars[..]);
                     if distance < smallest_distance {
                         smallest_distance = distance;
@@ -963,7 +750,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
             return Err("key length exceeds MAX_KEY_LENGTH".to_string());
         }
 
-        let meaningful_key = self.meaningful_key_substring(lookup_key);
+        let meaningful_key = SymSpell::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT, UTF8_KEYS>::meaningful_key_substring(lookup_key, &self.config);
         let meaningful_noop = meaningful_key.num_chars() == lookup_key_len;
 
         //Get the variant for our meaningful_key
@@ -981,7 +768,7 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
 
                 //But if they are different, we need to Iterate every KeyGroupID in the variant in order
                 //  to check if we really have a match on the whole key
-                let owned_lookup_key = Self::owned_key_from_key(lookup_key);
+                let owned_lookup_key = <Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT::from_key(lookup_key);
                 bincode_vec_iter::<KeyGroupID>(&variant_vec_bytes)
                 .filter_map(|key_group_id_bytes| {
                     let key_group_id = KeyGroupID::from(usize::from_le_bytes(key_group_id_bytes.try_into().unwrap()));
@@ -998,45 +785,6 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
         })?;
 
         Ok(record_ids)
-
-        // // GOAT Old implementation, in case we decide it is faster (I'm pretty sure it isn't)
-        // //Get the variant for our meaningful_key
-        // let variants_cf_handle = self.db.db.cf_handle(VARIANTS_CF_NAME).unwrap();
-        // if let Some(variant_vec_bytes) = self.db.db.get_pinned_cf(variants_cf_handle, meaningful_key.as_bytes())? {
-
-        //     let record_ids : Vec<RecordID> = if meaningful_noop {
-
-        //         //If the meaningful_key exactly equals our key, we can just return the variant's results
-        //         bincode_vec_iter::<KeyGroupID>(&variant_vec_bytes).map(|key_group_id_bytes| {
-        //             KeyGroupID::from(usize::from_le_bytes(key_group_id_bytes.try_into().unwrap()))
-        //         }).map(|key_group_id| key_group_id.record_id()).collect()
-
-        //     } else {
-
-        //         //But if they are different, we need to Iterate every KeyGroupID in the variant in order
-        //         //  to check if we really have a match on the whole key
-        //         let owned_lookup_key = Self::owned_key_from_key(lookup_key);
-        //         bincode_vec_iter::<KeyGroupID>(&variant_vec_bytes)
-        //         .filter_map(|key_group_id_bytes| {
-        //             let key_group_id = KeyGroupID::from(usize::from_le_bytes(key_group_id_bytes.try_into().unwrap()));
-                    
-        //             // Return only the KeyGroupIDs for records if their keys match the key we are looking up
-        //             let mut keys_iter = self.db.get_keys_in_group::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>(key_group_id).ok()?;
-        //             if keys_iter.any(|key| key == owned_lookup_key) {
-        //                 Some(key_group_id)
-        //             } else {
-        //                 None
-        //             }
-        //         }).map(|key_group_id| key_group_id.record_id()).collect()
-        //     };
-
-        //     Ok(record_ids)
-
-        // } else {
-
-        //     //No variant found, so return an empty Iterator
-        //     Ok(vec![])
-        // }
     }
 
     /// Returns the value associated with the specified record
@@ -1067,78 +815,6 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
         let result_iter = key_groups_iter.flat_map(move |key_group| self.db.get_keys_in_group::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>(key_group).unwrap());
 
         Ok(result_iter)
-    }
-
-    // Returns the "meaningful" part of a key, that is used as the starting point to generate the variants
-    fn meaningful_key_substring<K : Key<KeyCharT>>(&self, key: &K) -> <Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT {
-        if UTF8_KEYS {
-            let result_string = unicode_truncate(key.borrow_key_str().unwrap(), self.config.meaningful_key_len);
-            Self::owned_key_from_string(result_string)
-        } else {
-            let result_vec = if key.num_chars() > self.config.meaningful_key_len {
-                let (prefix, _remainder) = key.borrow_key_chars().unwrap().split_at(self.config.meaningful_key_len);
-                prefix.to_vec()
-            } else {
-                key.get_key_chars()
-            };
-            Self::owned_key_from_vec(result_vec)
-        }
-    }
-
-    // Returns a new owned key, that is a variant of the supplied key, without the character at the
-    // specified index
-    fn remove_char_from_key<K : Key<KeyCharT>>(key: &K, idx : usize) -> <Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT {
-        if UTF8_KEYS {
-            let result_string = unicode_remove_char(key.borrow_key_str().unwrap(), idx);
-            Self::owned_key_from_string(result_string)
-        } else {
-            let mut result_vec = key.get_key_chars();
-            result_vec.remove(idx);
-            Self::owned_key_from_vec(result_vec)
-        }
-    }
-
-    /// Returns all of the variants of a key, for querying or adding to the variants database
-    fn variants<K : Key<KeyCharT>>(&self, key: &K) -> HashSet<Vec<u8>> {
-
-        let mut variants_set : HashSet<Vec<u8>> = HashSet::new();
-        
-        //We shouldn't make any variants for empty keys
-        if key.num_chars() > 0 {
-
-            //We'll only build variants from the meaningful portion of the key
-            let meaningful_key = self.meaningful_key_substring(key);
-
-            if 0 < self.config.max_deletes {
-                self.variants_recursive(&meaningful_key, 0, &mut variants_set);
-            }
-            variants_set.insert(meaningful_key.into_bytes());    
-        }
-
-        variants_set
-    }
-    
-    // The recursive part of the variants() function
-    fn variants_recursive<K : Key<KeyCharT>>(&self, key: &K, edit_distance: usize, variants_set: &mut HashSet<Vec<u8>>) {
-    
-        let edit_distance = edit_distance + 1;
-    
-        let key_len = key.num_chars();
-    
-        if key_len > 1 {
-            for i in 0..key_len {
-                let variant = Self::remove_char_from_key(key, i);
-    
-                if !variants_set.contains(variant.as_bytes()) {
-    
-                    if edit_distance < self.config.max_deletes {
-                        self.variants_recursive(&variant, edit_distance, variants_set);
-                    }
-    
-                    variants_set.insert(variant.into_bytes());
-                }
-            }
-        }
     }
 
     #[cfg(feature = "perf_counters")]
@@ -1444,6 +1120,7 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
 #[cfg(test)]
 mod tests {
     use crate::{*};
+    use crate::unicode_string_helpers::{*};
     use std::fs;
     use std::path::PathBuf;
     use csv::ReaderBuilder;
