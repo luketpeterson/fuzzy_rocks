@@ -22,6 +22,26 @@ pub const MAX_KEY_LENGTH : usize = 95;
 // #![feature(min_const_generics)], and I'll hide that from novice API users by allowing the
 // compiler to infer the values from phantoms in the config structure.
 
+/// The TableConfig structure specifies all of the parameters for configuring a FuzzyRocks [Table]
+/// 
+/// -KeyCharT is a generic type that specifies the unit of deletion for the SymSpell algorithm.  In
+/// a typical implementation, this is a [char] for unicode keys or a [u8] for simple ascii, although
+/// it could be a data type of another size.  KeyCharT must be a [Copy] type, i.e. be contiguous in
+/// memory and not include any references.
+/// 
+/// -DistanceT is a generic type that represents a scalar distance in the [Metric Space](https://en.wikipedia.org/wiki/Metric_space) that contains
+/// all keys in the [Table].  While it is often desireable to use fractional types to express more
+/// precision than integers, the use of floating point types is discouraged on account of their
+/// inability to be reliably compared.
+/// 
+/// -ValueT is a generic type that represents a payload value associated with a record.  ValueT must
+/// be able to be serialized and deserialized from the database but otherwise is not constrained.
+/// 
+/// -`UTF8_KEYS` specifies whether the keys are UTF-8 encoded strings or not.  UTF-8 encoding allows 
+/// the majority of characters to be stored with only 8 bits (as opposed to 24 bit unicode [char]s,
+/// often padded to 32 bits) which allows the database to be more efficient, with the tradeoff being
+/// higher overhead performing conversions during access.  In general, `true` is advisable if you are
+/// using unicode keys.
 #[derive(Clone)]
 pub struct TableConfig<KeyCharT, DistanceT, ValueT, const UTF8_KEYS : bool> {
 

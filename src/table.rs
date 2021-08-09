@@ -1,0 +1,909 @@
+//!
+//! The Table module contains the main [Table] object
+//! 
+
+use core::marker::PhantomData;
+use core::hash::Hash;
+use std::collections::{HashMap, HashSet};
+
+use num_traits::Zero;
+use serde::{Serialize};
+
+use super::records::RecordID;
+use super::key::{*};
+use super::database::{*};
+use super::table_config::{*};
+use super::sym_spell::{*};
+use super::key_groups::{*};
+use super::bincode_helpers::{*};
+
+/// A collection containing records that may be searched by `key`
+pub struct Table<KeyCharT, DistanceT, ValueT, const UTF8_KEYS : bool> {
+    record_count : usize,
+    db : DBConnection,
+    config : TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>,
+    deleted_records : Vec<RecordID>, //NOTE: Currently we don't try to hold onto deleted records across unloads, but we may change this in the future.
+    #[cfg(feature = "perf_counters")]
+    perf_counters : Cell<PerfCounters>,
+    phantom_key: PhantomData<KeyCharT>,
+    phantom_value: PhantomData<ValueT>,
+}
+
+/// A private trait implemented by a [Table] to provide access to the keys in the DB, 
+/// whether they are UTF-8 encoded strings or arrays of KeyCharT
+/// 
+/// NOTE: This is the "Yandros Type-Lifter" pattern, invented by Yandros here:
+/// https://users.rust-lang.org/t/conditional-compilation-based-on-generic-constant/61131/5
+pub trait TableKeyEncoding<KeyCharT> {
+    type OwnedKeyT : OwnedKey<KeyCharT>;
+}
+impl <DistanceT, ValueT>TableKeyEncoding<char> for Table<char, DistanceT, ValueT, true> {
+    type OwnedKeyT = String;
+}
+impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned, DistanceT, ValueT>TableKeyEncoding<KeyCharT> for Table<KeyCharT, DistanceT, ValueT, false> {
+    type OwnedKeyT = Vec<KeyCharT>;
+}
+
+/// The implementation of the shared parts of Table
+impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::DeserializeOwned, DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, ValueT : 'static + Serialize + serde::de::DeserializeOwned, const UTF8_KEYS : bool>Table<KeyCharT, DistanceT, ValueT, UTF8_KEYS>
+    where Self : TableKeyEncoding<KeyCharT> {
+
+    /// Creates a new Table, backed by the database at the path provided
+    /// 
+    /// WARNING:  No sanity checks are performed to ensure the database being opened matches the parameters
+    /// of the table being created.  Therefore you may see bugs if you are opening a table that was created
+    /// using a different set of parameters.
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn new(path : &str, config : TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>) -> Result<Self, String> {
+
+        //Open the Database
+        let db = DBConnection::new(path)?;
+
+        //Find the next value for new RecordIDs, by probing the entries in the "rec_data" column family
+        let record_count = db.record_count()?;
+
+        Ok(Self {
+            record_count,
+            config : config,
+            db,
+            deleted_records : vec![],
+            #[cfg(feature = "perf_counters")]
+            perf_counters : Cell::new(PerfCounters::new()),
+            phantom_key : PhantomData,
+            phantom_value : PhantomData
+        })
+    }
+
+    /// Resets a Table, dropping every record in the table and restoring it to an empty state.
+    /// 
+    /// (Dropping in a database sense, not a Rust sense)
+    pub fn reset(&mut self) -> Result<(), String> {
+
+        //Reset the database
+        self.db.reset_database()?;
+
+        //Reset the record_count, so newly inserted entries begin at 0 again
+        self.record_count = 0;
+        Ok(())
+    }
+
+    /// Deletes a record from the Table.
+    /// 
+    /// A deleted record cannot be accessed or otherwise found, but the RecordID may be reassigned
+    /// using [Table::replace].
+    pub fn delete(&mut self, record_id : RecordID) -> Result<(), String> {
+
+        self.delete_keys_internal(record_id)?;
+        self.db.delete_value(record_id)?;
+        self.deleted_records.push(record_id);
+
+        Ok(())
+    }
+
+    /// Deletes all of the keys belonging to a record, and all associated variants
+    /// 
+    /// Leaves the record in a half-composed state, so should only be called as part of another
+    /// operation.
+    fn delete_keys_internal(&mut self, record_id : RecordID) -> Result<(), String> {
+
+        //Get all of the key-groups belonging to the record
+        for key_group in self.db.get_record_key_groups(record_id)? {
+
+            //Get all the keys for the group we're removing, so we can compute all the variants
+            let keys_iter = self.db.get_keys_in_group::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>(key_group)?;
+            let mut variants = HashSet::new();
+            for key in keys_iter {
+                let key_variants = SymSpell::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT, UTF8_KEYS>::variants(&key, &self.config);
+                variants.extend(key_variants);
+            }
+
+            //Remove the variants' reference to this key group
+            self.db.delete_variant_references(key_group, variants)?;
+            
+            //Delete the key group entry in the table
+            self.db.delete_key_group_entry(key_group)?;
+        }
+
+        //Now replace the key groups vec in the "rec_data" table with an empty sentinel vec
+        //NOTE: We replace the record rather than delete it because we assume there are no gaps in the
+        // RecordIDs, when assigning new a RecordID
+        self.db.put_record_key_groups(record_id, &[])?;
+
+        Ok(())
+    }
+
+    /// Divides the keys up into key groups and assigns them to a record.
+    /// 
+    /// Should NEVER be called on a record that already has keys or orphaned database entries will result
+    fn put_record_keys<'a, K : Key<KeyCharT> + 'a, KeysIterT : Iterator<Item=&'a K>>(&mut self, record_id : RecordID, keys_iter : KeysIterT, num_keys : usize) -> Result<(), String> {
+    
+        //Make groups for the keys
+        let groups = KeyGroups::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT, UTF8_KEYS>::make_groups_from_keys(keys_iter, num_keys, &self.config).unwrap();
+        let num_groups = groups.key_group_keys.len();
+
+        //Put the variants for each group into the right table
+        for (idx, variant_set) in groups.key_group_variants.into_iter().enumerate() {
+            let key_group_id = KeyGroupID::from_record_and_idx(record_id, idx); 
+            self.db.put_variant_references(key_group_id, variant_set)?;
+        }
+        
+        //Put the keys for each group into the table
+        for (idx, key_set) in groups.key_group_keys.into_iter().enumerate() {
+            let key_group_id = KeyGroupID::from_record_and_idx(record_id, idx); 
+            self.db.put_key_group_entry(key_group_id, &key_set)?;
+        }
+
+        //Put the key group record into the rec_data table
+        let group_indices : Vec<usize> = (0..num_groups).into_iter().collect();
+        self.db.put_record_key_groups(record_id, &group_indices[..])
+    }
+
+    /// Add additional keys to a record, including creation of all associated variants
+    fn add_keys_internal<'a, K : Key<KeyCharT> + 'a, KeysIterT : Iterator<Item=&'a K>>(&mut self, record_id : RecordID, keys_iter : KeysIterT, num_keys : usize) -> Result<(), String> {
+
+        //Get the record's existing key groups and variants, so we can figure out the
+        //best places for each additional new key
+        let mut groups = KeyGroups::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT, UTF8_KEYS>::load_key_groups(&self.db, record_id, &self.config)?;
+
+        //Clone the existing groups, so we can determine which variants were added where
+        let existing_groups_variants = groups.key_group_variants.clone();
+
+        //Go over each key and add it to the key groups,
+        // This add_key_to_groups function encapsulates the logic to add each key to
+        // the correct group or create a new group
+        for (key_idx, key) in keys_iter.enumerate() {
+            let update_reverse_index = key_idx < num_keys-1;
+            groups.add_key_to_groups(key, update_reverse_index, &self.config)?;
+        }
+
+        //Go over each group, work out the variants we need to add, then add them and update the group
+        let empty_set = HashSet::new();
+        for (group_idx, keys_set) in groups.key_group_keys.iter().enumerate() {
+
+            //Get the variants for the group, as it existed prior to adding any keys
+            let existing_keys_variants = match existing_groups_variants.get(group_idx) {
+                Some(variant_set) => variant_set,
+                None => &empty_set
+            };
+
+            //Calculate the set of variants that is unique to the keys we'll be adding
+            let mut unique_keys_variants = HashSet::new();
+            for unique_keys_variant in groups.key_group_variants[group_idx].difference(&existing_keys_variants) {
+                unique_keys_variants.insert(unique_keys_variant.to_owned());
+            }
+
+            //Add the key_group_id to the appropriate entries for each of the new variants
+            let key_group_id = KeyGroupID::from_record_and_idx(record_id, groups.group_ids[group_idx]);
+            self.db.put_variant_references(key_group_id, unique_keys_variants)?;
+
+            //Add the new keys to the key group's entry in the keys table by replacing the keys vector
+            // with the superset
+            self.db.put_key_group_entry(key_group_id, keys_set)?;
+        }
+
+        //Put the new rec_data entry, to reflect all the associated key groups
+        self.db.put_record_key_groups(record_id, &groups.group_ids[..])
+    }
+
+    /// Removes the specified keys from the keys associated with a record
+    /// 
+    /// If one of the specified keys is not associated with the record then that specified
+    /// key will be ignored.
+    fn remove_keys_internal<K : Key<KeyCharT>>(&mut self, record_id : RecordID, remove_keys : &HashSet<&K>) -> Result<(), String> {
+
+        //Get all of the existing groups
+        let group_ids : Vec<KeyGroupID> = self.db.get_record_key_groups(record_id)?.collect();
+
+        //Go through each existing group, and build a HashSet containing the keys that
+        // we will delete and the keys that will remain after the removal
+        let mut remaining_key_count = 0;
+        let mut deleted_group_keys_sets = vec![];
+        let mut remaining_group_keys_sets = vec![];
+        for key_group in group_ids.iter() {
+            let mut deleted_keys = HashSet::new();
+            let mut remaining_keys = HashSet::new();
+            for existing_key in self.db.get_keys_in_group::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>(*key_group)? {
+
+                //NOTE: We know this is safe because the unsafety comes from the fact that
+                // query_key might borrow existing_key, which is temporary, while query_key's
+                // lifetime is 'a, which is beyond this function.  However, query_key doesn't
+                // outlast this unsafe scope and we know HashSet::contains won't hold onto it.
+                let set_contains_key = unsafe {
+                    let query_key = K::from_owned_unsafe(&existing_key);
+                    remove_keys.contains(&query_key)
+                };
+                
+                //TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
+                // let query_key = K::new_borrowed_from_owned(&existing_key);
+                // let set_contains_key = remove_keys.contains(&query_key);
+                
+                if !set_contains_key {
+                    remaining_keys.insert(existing_key);
+                    remaining_key_count += 1;
+                } else {
+                    deleted_keys.insert(existing_key);
+                }
+            }
+            deleted_group_keys_sets.push(deleted_keys);
+            remaining_group_keys_sets.push(remaining_keys);
+        }
+
+        //If we're left with no remaining keys, we should throw an error because all records must
+        //have at least one key
+        if remaining_key_count < 1 {
+            return Err("cannot remove all keys from record".to_string());
+        }
+
+        //Go through each group and update its keys and variants, or remove the group altogether
+        let mut remaining_group_indices = vec![];
+        for (idx, group_id) in group_ids.into_iter().enumerate() {
+
+            //If we didn't remove any keys from this group, there is nothing to do here.
+            if deleted_group_keys_sets[idx].len() == 0 {
+                remaining_group_indices.push(group_id.group_idx());
+                continue;
+            }
+
+            //Compute all variants for the keys we're removing from this group
+            let mut remove_keys_variants = HashSet::new();
+            for remove_key in deleted_group_keys_sets[idx].iter() {
+                let keys_variants = SymSpell::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT, UTF8_KEYS>::variants(remove_key, &self.config);
+                remove_keys_variants.extend(keys_variants);
+            }
+
+            //Compute all the variants for the keys that must remain in the group
+            let mut remaining_keys_variants = HashSet::new();
+            for remaining_key in remaining_group_keys_sets[idx].iter() {
+                let keys_variants = SymSpell::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT, UTF8_KEYS>::variants(remaining_key, &self.config);
+                remaining_keys_variants.extend(keys_variants);
+            }
+
+            //Exclude all of the overlapping variants, leaving only the variants that are unique
+            //to the keys we're removing
+            let mut unique_keys_variants = HashSet::new();
+            for unique_keys_variant in remove_keys_variants.difference(&remaining_keys_variants) {
+                unique_keys_variants.insert(unique_keys_variant.to_owned());
+            }
+
+            //Delete our KeyGroupID from each variant's list, and remove the variant list if we made it empty
+            self.db.delete_variant_references(group_id, unique_keys_variants)?;
+
+            //Update or delete the group
+            if remaining_group_keys_sets[idx].len() == 0 {
+                //Delete the group's keys record if we made the group empty
+                self.db.delete_key_group_entry(group_id)?;
+            } else {
+                //Otherwise update the group's keys record
+                self.db.put_key_group_entry(group_id, &remaining_group_keys_sets[idx])?;
+                remaining_group_indices.push(group_id.group_idx());
+            }
+            
+        }
+
+        //Update the record's rec_data entry to reflect the new groups after deletion
+        self.db.put_record_key_groups(record_id, &remaining_group_indices[..])
+    }
+
+    /// Replaces all of the keys in a record with the supplied keys
+    fn replace_keys_internal<'a, K : Key<KeyCharT>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
+
+        if keys.len() < 1 {
+            return Err("record must have at least one key".to_string());
+        }
+        if keys.iter().any(|key| key.num_chars() > MAX_KEY_LENGTH) {
+            return Err("key length exceeds MAX_KEY_LENGTH".to_string());
+        }
+
+        //Delete the old keys
+        self.delete_keys_internal(record_id)?;
+
+        //Set the keys on the new record
+        self.put_record_keys(record_id, keys.into_iter(), keys.len())
+    }
+
+    /// Replaces a record's value with the supplied value.  Returns the value that was replaced
+    /// 
+    /// The supplied `record_id` must references an existing record that has not been deleted.
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn replace_value(&mut self, record_id : RecordID, value : &ValueT) -> Result<ValueT, String> {
+
+        let old_value = self.db.get_value(record_id)?;
+
+        self.db.put_value(record_id, value)?;
+
+        Ok(old_value)
+    }
+
+    /// Inserts a record into the Table, called by insert(), which is implemented differently depending
+    /// on the UTF8_KEYS constant
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    fn insert_internal<'a, K : Key<KeyCharT> + 'a, KeysIterT : Iterator<Item=&'a K>>(&mut self, keys_iter : KeysIterT, num_keys : usize, value : &ValueT) -> Result<RecordID, String> {
+
+        if num_keys < 1 {
+            return Err("record must have at least one key".to_string());
+        }
+
+        let new_record_id = match self.deleted_records.pop() {
+            None => {
+                //We'll be creating a new record, so get the next unique record_id
+                let new_record_id = RecordID::from(self.record_count);
+                self.record_count += 1;
+                new_record_id
+            },
+            Some(record_id) => record_id
+        };
+
+        //Set the keys on the new record
+        self.put_record_keys(new_record_id, keys_iter, num_keys)?;
+
+        //Put the value into its appropriate table
+        self.db.put_value(new_record_id, value)?;
+
+        Ok(new_record_id)
+    }
+
+    /// Visits all possible candidate keys for a given fuzzy search key, based on config.max_deletes,
+    /// and invokes the supplied closure for each candidate KeyGroup found.
+    /// 
+    /// NOTE: The same group may be found via multiple variants.  It is the responsibility of
+    /// the closure to avoid doing duplicate work.
+    /// 
+    /// QUESTION: should the visitor closure be able to return a bool, to mean "stop" or "keep going"?
+    fn visit_fuzzy_candidates<K : Key<KeyCharT>, F : FnMut(KeyGroupID)>(&self, key : &K, mut visitor : F) -> Result<(), String> {
+
+        if key.num_chars() > MAX_KEY_LENGTH {
+            return Err("key length exceeds MAX_KEY_LENGTH".to_string());
+        }
+
+        //Create all of the potential variants based off of the "meaningful" part of the key
+        let variants = SymSpell::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT, UTF8_KEYS>::variants(key, &self.config);
+
+        //Check to see if we have entries in the "variants" database for any of the key variants
+        self.db.visit_variants(variants, |variant_vec_bytes| {
+
+            #[cfg(feature = "perf_counters")]
+            {
+                let num_key_group_ids = bincode_vec_fixint_len(variant_vec_bytes);
+                let mut perf_counters = self.perf_counters.get();
+                perf_counters.variant_load_count += 1;
+                if perf_counters.max_variant_entry_refs < num_key_group_ids {
+                    perf_counters.max_variant_entry_refs = num_key_group_ids;
+                }
+                self.perf_counters.set(perf_counters);
+            }
+    
+            // Call the visitor for each KeyGroup we found
+            for key_group_id_bytes in bincode_vec_iter::<KeyGroupID>(variant_vec_bytes) {
+                visitor(KeyGroupID::from(usize::from_le_bytes(key_group_id_bytes.try_into().unwrap())));
+            }
+        })
+    }
+
+    fn lookup_fuzzy_raw_internal<K : Key<KeyCharT>>(&self, key : &K) -> Result<impl Iterator<Item=RecordID>, String> {
+
+        //Create a new HashSet to hold all of the RecordIDs that we find
+        let mut result_set = HashSet::new(); //TODO, may want to allocate this with a non-zero capacity
+
+        //Our visitor closure just puts the KeyGroup's RecordID into a HashSet
+        let raw_visitor_closure = |key_group_id : KeyGroupID| {
+            result_set.insert(key_group_id.record_id());
+        };
+
+        //Visit all the potential records
+        self.visit_fuzzy_candidates(key, raw_visitor_closure)?;
+
+        //Return an iterator through the HashSet we just made
+        Ok(result_set.into_iter())
+    }
+
+    /// Returns an iterator over all RecordIDs and smallest distance values found with a fuzzy lookup
+    /// after evaluating the supplied  distance function for every found candidate key.
+    /// 
+    /// NOTE: This function evaluates the distance function for all keys in advance of returning the
+    /// iterator.  A lazy evaluation would be possible but would incur a sort of the KeyGroupIDs.
+    /// This would be needed to ensure that the smallest distance value for a given record was returned.
+    /// It would be necessary to evaluate every key group for a particular record before returning the
+    /// record.  The decision not to do this is on account of the fact that [lookup_fuzzy_raw_internal]
+    /// could be used instead if the caller wants a quick-to-return iterator.
+    fn lookup_fuzzy_internal<K : Key<KeyCharT>>(&self, key : &K, threshold : Option<DistanceT>) -> Result<impl Iterator<Item=(RecordID, DistanceT)>, String> {
+
+        let distance_function = self.config.distance_function;
+
+        //Create a new HashMap to hold all of the RecordIDs that we might want to return, and the lowest
+        // distance we find for that particular record
+        let mut result_map = HashMap::new(); //TODO, may want to allocate this with a non-zero capacity
+        let mut visited_groups = HashSet::new();
+
+        //If we can borrow the lookup chars directly then do it, otherwise get them from a buffer
+        let key_chars_vec;
+        let looup_key_chars = if let Some(key_chars) = key.borrow_key_chars() {
+            key_chars
+        } else {
+            key_chars_vec = key.get_key_chars();
+            &key_chars_vec[..]
+        };
+
+        //pre-allocate the buffer we'll expand the key-chars into
+        let mut key_chars_buf : Vec<KeyCharT> = Vec::with_capacity(MAX_KEY_LENGTH);
+
+        //Our visitor closure tests the key using the distance function and threshold
+        let lookup_fuzzy_visitor_closure = |key_group_id : KeyGroupID| {
+
+            //QUESTION: Should we have an alternate fast path that only evaluates until we find
+            // any distance smaller than threshold?  It would mean we couldn't return a reliable
+            // distance but would save us evaluating distance for potentially many keys
+            
+            if !visited_groups.contains(&key_group_id) {
+
+                //Check the record's keys with the distance function and find the smallest distance
+                let mut record_keys_iter = self.db.get_keys_in_group::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>(key_group_id).unwrap().into_iter();
+                let record_key = record_keys_iter.next().unwrap(); //If we have a zero-element keys array, it's a bug elsewhere, so this unwrap should always succeed
+                let record_key_chars = record_key.move_into_buf(&mut key_chars_buf);
+                let mut smallest_distance = distance_function(&record_key_chars[..], &looup_key_chars[..]); 
+                for record_key in record_keys_iter {
+                    let record_key_chars = record_key.move_into_buf(&mut key_chars_buf);
+                    let distance = distance_function(&record_key_chars, &looup_key_chars[..]);
+                    if distance < smallest_distance {
+                        smallest_distance = distance;
+                    }
+                }
+
+                match threshold {
+                    Some(threshold) => {
+                        if smallest_distance <= threshold{
+                            result_map.insert(key_group_id.record_id(), smallest_distance);
+                        }       
+                    }
+                    None => {
+                        result_map.insert(key_group_id.record_id(), smallest_distance);
+                    }
+                }
+
+                //Record that we've visited this key group, we we can skip it if we encounter it
+                //via a different variant
+                visited_groups.insert(key_group_id);
+            }
+        };
+
+        //Visit all the potential records
+        self.visit_fuzzy_candidates(key, lookup_fuzzy_visitor_closure)?;
+
+        //Return an iterator through the HashSet we just made
+        Ok(result_map.into_iter())
+    }
+
+    fn lookup_best_internal<K : Key<KeyCharT>>(&self, key : &K) -> Result<impl Iterator<Item=RecordID>, String> {
+
+        //First, we should check to see if lookup_exact gives us what we want.  Because if it does,
+        // it's muuuuuuch faster.  If we have an exact result, no other key will be a better match
+        let mut results_vec = self.lookup_exact_internal(key)?;
+        if results_vec.len() > 0 {
+            return Ok(results_vec.into_iter());
+        }
+        
+        //Assuming lookup_exact didn't work, we'll need to perform the whole fuzzy lookup and iterate each key
+        //to figure out the closest distance
+        let mut result_iter = self.lookup_fuzzy_internal(key, None)?;
+        
+        if let Some(first_result) = result_iter.next() {
+            let mut best_distance = first_result.1;
+            results_vec.push(first_result.0);
+            for result in result_iter {
+                if result.1 == best_distance {
+                    results_vec.push(result.0);
+                } else if result.1 < best_distance {
+                    //We've found a shorter distance, so drop the results_vec and start a new one
+                    best_distance = result.1;
+                    results_vec = vec![];
+                    results_vec.push(result.0);
+                }
+            }
+
+            return Ok(results_vec.into_iter());
+        }
+
+        Ok(vec![].into_iter())
+    }
+
+    /// Checks the table for records with keys that precisely match the key supplied
+    /// 
+    /// This function will be more efficient than a fuzzy lookup.
+    fn lookup_exact_internal<K : Key<KeyCharT>>(&self, lookup_key : &K) -> Result<Vec<RecordID>, String> {
+
+        let lookup_key_len = lookup_key.num_chars();
+        if lookup_key_len > MAX_KEY_LENGTH {
+            return Err("key length exceeds MAX_KEY_LENGTH".to_string());
+        }
+
+        let meaningful_key = SymSpell::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT, UTF8_KEYS>::meaningful_key_substring(lookup_key, &self.config);
+        let meaningful_noop = meaningful_key.num_chars() == lookup_key_len;
+
+        //Get the variant for our meaningful_key
+        let mut record_ids : Vec<RecordID> = vec![];
+        self.db.visit_exact_variant(meaningful_key.as_bytes(), |variant_vec_bytes| {
+
+            record_ids = if meaningful_noop {
+
+                //If the meaningful_key exactly equals our key, we can just return the variant's results
+                bincode_vec_iter::<KeyGroupID>(&variant_vec_bytes).map(|key_group_id_bytes| {
+                    KeyGroupID::from(usize::from_le_bytes(key_group_id_bytes.try_into().unwrap()))
+                }).map(|key_group_id| key_group_id.record_id()).collect()
+
+            } else {
+
+                //But if they are different, we need to Iterate every KeyGroupID in the variant in order
+                //  to check if we really have a match on the whole key
+                let owned_lookup_key = <Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT::from_key(lookup_key);
+                bincode_vec_iter::<KeyGroupID>(&variant_vec_bytes)
+                .filter_map(|key_group_id_bytes| {
+                    let key_group_id = KeyGroupID::from(usize::from_le_bytes(key_group_id_bytes.try_into().unwrap()));
+                    
+                    // Return only the KeyGroupIDs for records if their keys match the key we are looking up
+                    let mut keys_iter = self.db.get_keys_in_group::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>(key_group_id).ok()?;
+                    if keys_iter.any(|key| key == owned_lookup_key) {
+                        Some(key_group_id)
+                    } else {
+                        None
+                    }
+                }).map(|key_group_id| key_group_id.record_id()).collect()
+            };
+        })?;
+
+        Ok(record_ids)
+    }
+
+    /// Returns the value associated with the specified record
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn get_value(&self, record_id : RecordID) -> Result<ValueT, String> {
+        self.db.get_value(record_id)
+    }
+
+    /// Returns the number of keys associated with a specified record
+    pub fn keys_count(&self, record_id : RecordID) -> Result<usize, String> {
+
+        let mut keys_count = 0;
+
+        //Go over every key group associated with the record
+        for key_group in self.db.get_record_key_groups(record_id)? {
+            keys_count += self.db.keys_count_in_group(key_group)?;
+        }
+
+        Ok(keys_count as usize)
+    }
+
+    /// Returns all of the keys for a record, across all key groups
+    fn get_keys_internal<'a>(&'a self, record_id : RecordID) -> Result<impl Iterator<Item=<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT> + 'a, String> {
+
+        let key_groups_iter = self.db.get_record_key_groups(record_id)?;
+        let result_iter = key_groups_iter.flat_map(move |key_group| self.db.get_keys_in_group::<<Self as TableKeyEncoding<KeyCharT>>::OwnedKeyT>(key_group).unwrap());
+
+        Ok(result_iter)
+    }
+
+    #[cfg(feature = "perf_counters")]
+    pub fn reset_perf_counters(&self) {
+        self.perf_counters.set(PerfCounters::new());
+    }
+}
+
+impl <DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, ValueT : 'static + Serialize + serde::de::DeserializeOwned>Table<char, DistanceT, ValueT, true> {
+
+    /// Inserts a new key-value pair into the table and returns the RecordID of the new record
+    /// 
+    /// This is a high-level interface to be used if multiple keys are not needed, but is
+    /// functions the same as [create](Table::create)
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn insert(&mut self, key : &str, value : &ValueT) -> Result<RecordID, String> {
+        self.insert_internal([&key].iter().map(|key| *key), 1, value)
+    }
+
+    /// Retrieves a key-value pair using a RecordID
+    /// 
+    /// This is a high-level interface to be used if multiple keys are not needed, but is
+    /// functions the same as [get_one_key](Table::get_one_key) / [get_value](Table::get_value)
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn get(&self, record_id : RecordID) -> Result<(String, ValueT), String> {
+        let key = self.get_one_key(record_id)?;
+        let value = self.get_value(record_id)?;
+
+        Ok((key, value))
+    }
+
+    /// Creates a new record in the table and returns the RecordID of the new record
+    /// 
+    /// This function will always create a new record, regardless of whether an identical key exists.
+    /// It is permissible to have two distinct records with identical keys.
+    /// 
+    /// NOTE: This function takes an &T for value rather than an owned T because it must make an
+    /// internal copy regardless of passed ownership, so requiring an owned object would ofter
+    /// result in a redundant copy.  However this is different from most containers, and makes things
+    /// feel awkward when using [String] types for values.
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn create<'a, K : Key<char>>(&mut self, keys : &'a [K], value : &ValueT) -> Result<RecordID, String> {
+        self.insert_internal(keys.into_iter(), keys.len(), value)
+    }
+
+    /// Adds the supplied keys to the record's keys
+    /// 
+    /// The supplied `record_id` must references an existing record that has not been deleted.
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn add_keys<'a, K : Key<char>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
+        self.add_keys_internal(record_id, keys.into_iter(), keys.len())
+    }
+
+//GOATGOAT, Should I take a Key instead, for all of the above functions?????
+
+//GOATGOATGOAT, Need a test where I pass a Vec<char> as the key to a utf8 encoded key table
+// Need to test creating with utf-8 and finding using both exact and fuzzy, using a char vec
+// need to test creating with a char vec, and finding both exact and fuzzy, using a utf-8 string
+
+    /// Removes the supplied keys from the keys associated with a record
+    /// 
+    /// If one of the specified keys is not associated with the record then that specified
+    /// key will be ignored.
+    /// 
+    /// If removing the keys would result in a record with no keys, this operation will return
+    /// an error and no keys will be removed, because all records must have at least one key.
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn remove_keys<K : Key<char>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
+        let keys_set : HashSet<&K> = HashSet::from_iter(keys.into_iter());
+        self.remove_keys_internal(record_id, &keys_set)
+    }
+
+    /// Replaces a record's keys with the supplied keys
+    /// 
+    /// The supplied `record_id` must references an existing record that has not been deleted.
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn replace_keys<'a, K : Key<char>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
+        self.replace_keys_internal(record_id, keys)
+    }
+
+    /// Returns an iterator over all of the key associated with the specified record
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn get_keys<'a>(&'a self, record_id : RecordID) -> Result<impl Iterator<Item=String> + 'a, String> {
+        self.get_keys_internal(record_id)
+    }
+
+    /// Returns one key associated with the specified record.  If the record has more than one key
+    /// then which key is unspecified
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn get_one_key(&self, record_id : RecordID) -> Result<String, String> {
+        //TODO: Perhaps we can speed this up in the future by avoiding deserializing all keys
+        //NOTE: With the Key Groups architecture and the lazy nature of iterators, we'll now only
+        // deserialize the keys in one key group. So perhaps that's good enough.  On the downside, we
+        // now pull the rec_data entry to get the index of the first key group.  99 times out of 100,
+        // we'd be able to sucessfully guess the key group entry by looking at entry 0, and could then
+        // fall back to checking the rec_data entry if that failed.  Depends on whether we want the
+        // last ounce of performance from this function or not.
+        let first_key = self.get_keys_internal(record_id)?.next().unwrap();
+        Ok(first_key)
+    }
+
+    /// Locates all records in the table with keys that precisely match the key supplied
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn lookup_exact(&self, key : &str) -> Result<impl Iterator<Item=RecordID>, String> {
+        self.lookup_exact_internal(&key).map(|result_vec| result_vec.into_iter())
+    }
+
+    /// Locates all records in the table with a key that is within a deletion distance of [config.max_deletes] of
+    /// the key supplied, based on the SymSpell algorithm.
+    /// 
+    /// This function underlies all fuzzy lookups, and does no further filtering based on any distance function.
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn lookup_fuzzy_raw<'a>(&'a self, key : &'a str) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
+        self.lookup_fuzzy_raw_internal(&key)
+    }
+
+    /// Locates all records in the table for which the supplied `distance_function` evaluates to a result smaller
+    /// than the supplied `threshold` when comparing the record's key with the supplied `key`
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn lookup_fuzzy<'a>(&'a self, key : &'a str, threshold : DistanceT) -> Result<impl Iterator<Item=(RecordID, DistanceT)> + 'a, String> {
+        self.lookup_fuzzy_internal(&key, Some(threshold))
+    }
+
+    /// Locates the record in the table for which the supplied `distance_function` evaluates to the lowest value
+    /// when comparing the record's key with the supplied `key`.
+    /// 
+    /// If no matching record is found within the table's `config.max_deletes`, this method will return an error.
+    /// 
+    /// NOTE: If two or more results have the same returned distance value and that is the smallest value, the
+    /// implementation does not specify which result will be returned.
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn lookup_best<'a>(&'a self, key : &'a str) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
+        self.lookup_best_internal(&key)
+    }
+}
+
+impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned, DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, ValueT : 'static + Serialize + serde::de::DeserializeOwned>Table<KeyCharT, DistanceT, ValueT, false> {
+
+    /// Inserts a new key-value pair into the table and returns the RecordID of the new record
+    /// 
+    /// This is a high-level interface to be used if multiple keys are not needed, but is
+    /// functions the same as [create](Table::create)
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn insert(&mut self, key : &[KeyCharT], value : &ValueT) -> Result<RecordID, String> {
+        let keys_vec = vec![&key];
+        self.insert_internal(keys_vec.into_iter(), 1, value)
+    }
+
+    /// Retrieves a key-value pair using a RecordID
+    /// 
+    /// This is a high-level interface to be used if multiple keys are not needed, but is
+    /// functions the same as [get_one_key](Table::get_one_key) / [get_value](Table::get_value)
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn get(&self, record_id : RecordID) -> Result<(Vec<KeyCharT>, ValueT), String> {
+        let key = self.get_one_key(record_id)?;
+        let value = self.get_value(record_id)?;
+
+        Ok((key, value))
+    }
+
+    /// Creates a new record in the table and returns the RecordID of the new record
+    /// 
+    /// This function will always create a new record, regardless of whether an identical key exists.
+    /// It is permissible to have two distinct records with identical keys.
+    /// 
+    /// NOTE: This function takes an &T for value rather than an owned T because it must make an
+    /// internal copy regardless of passed ownership, so requiring an owned object would ofter
+    /// result in a redundant copy.  However this is different from most containers, and makes things
+    /// feel awkward when using [String] types for values.
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn create<'a, K : Key<KeyCharT>>(&mut self, keys : &'a [K], value : &ValueT) -> Result<RecordID, String> {
+        let num_keys = keys.len();
+        let keys_iter = keys.into_iter();
+        self.insert_internal(keys_iter, num_keys, value)
+    }
+
+    /// Adds the supplied keys to the record's keys
+    /// 
+    /// The supplied `record_id` must references an existing record that has not been deleted.
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn add_keys<'a, K : Key<KeyCharT>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
+        self.add_keys_internal(record_id, keys.into_iter(), keys.len())
+    }
+
+    /// Removes the supplied keys from the keys associated with a record
+    /// 
+    /// If one of the specified keys is not associated with the record then that specified
+    /// key will be ignored.
+    /// 
+    /// If removing the keys would result in a record with no keys, this operation will return
+    /// an error and no keys will be removed, because all records must have at least one key.
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn remove_keys<K : Key<KeyCharT>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
+        let keys_set : HashSet<&K> = HashSet::from_iter(keys.into_iter());
+        self.remove_keys_internal(record_id, &keys_set)
+    }
+
+    /// Replaces a record's keys with the supplied keys
+    /// 
+    /// The supplied `record_id` must references an existing record that has not been deleted.
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn replace_keys<'a, K : Key<KeyCharT>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
+        self.replace_keys_internal(record_id, keys)
+    }
+
+    /// Returns an iterator over all of the key associated with the specified record
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn get_keys<'a>(&'a self, record_id : RecordID) -> Result<impl Iterator<Item=Vec<KeyCharT>> + 'a, String> {
+        self.get_keys_internal(record_id)
+    }
+
+    /// Returns one key associated with the specified record.  If the record has more than one key
+    /// then which key is unspecified
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn get_one_key(&self, record_id : RecordID) -> Result<Vec<KeyCharT>, String> {
+        //TODO: Perhaps we can speed this up in the future by avoiding deserializing all keys
+        Ok(self.get_keys_internal(record_id)?.next().unwrap())
+    }
+
+    /// Locates all records in the table with keys that precisely match the key supplied
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn lookup_exact<'a>(&'a self, key : &'a [KeyCharT]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
+        self.lookup_exact_internal(&key).map(|result_vec| result_vec.into_iter())
+    }
+
+    /// Locates all records in the table with a key that is within a deletion distance of `config.max_deletes` of
+    /// the key supplied, based on the SymSpell algorithm.
+    /// 
+    /// This function underlies all fuzzy lookups, and does no further filtering based on any distance function.
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn lookup_fuzzy_raw<'a>(&'a self, key : &'a [KeyCharT]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
+        self.lookup_fuzzy_raw_internal(&key)
+    }
+
+    /// Locates all records in the table for which the supplied `distance_function` evaluates to a result smaller
+    /// than the supplied `threshold` when comparing the record's key with the supplied `key`
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn lookup_fuzzy<'a>(&'a self, key : &'a [KeyCharT], threshold : DistanceT) -> Result<impl Iterator<Item=(RecordID, DistanceT)> + 'a, String> {
+        self.lookup_fuzzy_internal(&key, Some(threshold))
+    }
+
+    /// Locates the record in the table for which the supplied `distance_function` evaluates to the lowest value
+    /// when comparing the record's key with the supplied `key`.
+    /// 
+    /// If no matching record is found within the table's `config.max_deletes`, this method will return an error.
+    /// 
+    /// NOTE: If two or more results have the same returned distance value and that is the smallest value, the
+    /// implementation does not specify which result will be returned.
+    /// 
+    /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
+    /// unwrapped RocksDB error.
+    pub fn lookup_best<'a>(&'a self, key : &'a [KeyCharT]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
+        self.lookup_best_internal(&key)
+    }
+}
