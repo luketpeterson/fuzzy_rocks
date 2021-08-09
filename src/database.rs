@@ -339,7 +339,6 @@ impl DBConnection {
         Ok(())
     }
 
-
 }
 
 impl Drop for DBConnection {

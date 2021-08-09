@@ -113,7 +113,9 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
 
 /// Implemented by all types that can be used as keys, whether they are UTF-8 encoded
 /// strings or arrays of KeyCharT
-pub trait Key<KeyCharT> : KeyUnsafe<KeyCharT> {
+pub trait Key<KeyCharT> : Eq + Hash + Clone + Serialize + KeyUnsafe<KeyCharT> {
+    //TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
+    //type BorrowedKey<'a> : Key<KeyCharT>;
 
     fn num_chars(&self) -> usize;
     fn as_bytes(&self) -> &[u8];
@@ -121,6 +123,9 @@ pub trait Key<KeyCharT> : KeyUnsafe<KeyCharT> {
     fn borrow_key_chars(&self) -> Option<&[KeyCharT]>;
     fn get_key_chars(&self) -> Vec<KeyCharT>;
     fn borrow_key_str(&self) -> Option<&str>;
+
+    //TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
+    // fn new_borrowed_from_owned<'a, OwnedKeyT : OwnedKey<KeyCharT>>(owned_key : &'a OwnedKeyT) -> Self::BorrowedKey<'a>;
 }
 
 /// The private unsafe accessors for the Key trait
@@ -134,6 +139,9 @@ impl <KeyCharT>Key<KeyCharT> for &[KeyCharT]
     where
     KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned,
 {
+    //TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
+    // type BorrowedKey<'a> = &'a [KeyCharT];
+
     fn num_chars(&self) -> usize {
         self.len()
     }
@@ -166,9 +174,14 @@ impl <KeyCharT>Key<KeyCharT> for &[KeyCharT]
     fn borrow_key_str(&self) -> Option<&str> {
         None
     }
+
+    //TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
+    // fn new_borrowed_from_owned<'a, OwnedKeyT : OwnedKey<KeyCharT>>(owned_key : &'a OwnedKeyT) -> &'a [KeyCharT] {
+    //     owned_key.borrow_vec().unwrap()
+    // }
 }
 
-//GOATGOAT, Get rid of this KeyUnsafe trait, because I think we can use the 2e7 pattern
+//TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
 impl <'a, KeyCharT>KeyUnsafe<KeyCharT> for &'a [KeyCharT]
     where
     KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned
@@ -183,6 +196,9 @@ impl <KeyCharT>Key<KeyCharT> for Vec<KeyCharT>
     where
     KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned,
 {
+    //TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
+    //type BorrowedKey<'a> = Vec<KeyCharT>;
+
     fn num_chars(&self) -> usize {
         self.len()
     }
@@ -214,6 +230,11 @@ impl <KeyCharT>Key<KeyCharT> for Vec<KeyCharT>
     fn borrow_key_str(&self) -> Option<&str> {
         None
     }
+
+    //TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
+    // fn new_borrowed_from_owned<OwnedKeyT : OwnedKey<KeyCharT>>(owned_key : &OwnedKeyT) -> Vec<KeyCharT> {
+    //     owned_key.as_vec().unwrap()
+    // }
 }
 
 impl <KeyCharT>KeyUnsafe<KeyCharT> for Vec<KeyCharT>
@@ -228,6 +249,9 @@ impl <KeyCharT>KeyUnsafe<KeyCharT> for Vec<KeyCharT>
 
 impl Key<char> for &str
 {
+    //TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
+    // type BorrowedKey<'a> = &'a str;
+
     fn num_chars(&self) -> usize {
         unicode_len(self)
     }
@@ -252,6 +276,11 @@ impl Key<char> for &str
     fn borrow_key_str(&self) -> Option<&str> {
         Some(self)
     }
+
+    //TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
+    // fn new_borrowed_from_owned<'a, OwnedKeyT : OwnedKey<char>>(owned_key : &'a OwnedKeyT) -> &'a str {
+    //     owned_key.borrow_str().unwrap()
+    // }
 }
 
 impl <'a>KeyUnsafe<char> for &'a str {
@@ -264,6 +293,9 @@ impl <'a>KeyUnsafe<char> for &'a str {
 
 impl Key<char> for String
 {
+    //TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
+    // type BorrowedKey<'a> = String;
+
     fn num_chars(&self) -> usize {
         unicode_len(self)
     }
@@ -287,6 +319,11 @@ impl Key<char> for String
     fn borrow_key_str(&self) -> Option<&str> {
         Some(&self)
     }
+
+    //TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
+    // fn new_borrowed_from_owned<OwnedKeyT : OwnedKey<char>>(owned_key : &OwnedKeyT) -> String {
+    //     owned_key.as_string().unwrap()
+    // }
 }
 
 impl KeyUnsafe<char> for String {

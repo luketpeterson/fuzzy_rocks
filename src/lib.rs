@@ -157,6 +157,9 @@
 //      *Save the Table config to the database (and the checksum of the distance function) to
 //      detect an error when the config changes in a way that makes the database invalid
 
+//TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
+// #![feature(generic_associated_types)]
+
 use core::marker::PhantomData;
 use core::hash::Hash;
 
@@ -245,6 +248,9 @@ impl PerfCounters {
 
 /// A private trait implemented by a [Table] to provide access to the keys in the DB, 
 /// whether they are UTF-8 encoded strings or arrays of KeyCharT
+/// 
+/// NOTE: This is the "Yandros Type-Lifter" pattern, invented by Yandros here:
+/// https://users.rust-lang.org/t/conditional-compilation-based-on-generic-constant/61131/5
 //GOAT Move this to a private module
 pub trait TableKeyEncoding<KeyCharT> {
     type OwnedKeyT : OwnedKey<KeyCharT>;
@@ -447,6 +453,10 @@ impl <KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::Deserialize
                     let query_key = K::from_owned_unsafe(&existing_key);
                     remove_keys.contains(&query_key)
                 };
+                
+                //TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
+                // let query_key = K::new_borrowed_from_owned(&existing_key);
+                // let set_contains_key = remove_keys.contains(&query_key); //GOAT collapse these two lines
                 
                 if !set_contains_key {
                     remaining_keys.insert(existing_key);
