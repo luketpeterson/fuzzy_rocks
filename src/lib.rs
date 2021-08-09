@@ -528,8 +528,17 @@ mod tests {
         let results : Vec<RecordID> = table.lookup_fuzzy_raw("Vendredi").unwrap().collect();
         assert_eq!(results.len(), 0);
         assert_eq!(table.keys_count(fri).unwrap(), 3);
-
     }
+
+    //TODO, I'd like to do a test where I reach straight to the internal Table API and pass a Vec<char>
+    // as the key to a utf8 encoded key table, but this isn't accessible as part of the public API.
+    // The purpose of this test would be to ensure that the conversion from UTF8 Strings and Vec<char>
+    // happened in a symmetrical way across the code base, and we weren't just getting lucky.
+    // When implementing this test, I should test it both ways.
+    // 1. test creating a record with a str key including non-ascii bytes, and then finding it using
+    //  both exact and fuzzy lookups, with a char vec
+    // 2. test creating a record with a char vec including non-ascii bytes, and finding it using both
+    //  exact and fuzzy lookups with a utf-8 string
 
     #[test]
     /// This test is tests some basic non-unicode key functionality.
@@ -541,16 +550,17 @@ mod tests {
         let mut table = Table::<u8, u8, f32, false>::new("test2.rocks", config).unwrap();
         table.reset().unwrap();
 
-        let one = table.insert(b"One", &1.0).unwrap();
-        let _two = table.insert(b"Dos", &2.0).unwrap();
-        let _three = table.insert(b"San", &3.0).unwrap();
-        let pi = table.insert(b"Pi", &3.1415926535).unwrap();
+        //GOAT, Is there a way to get rid of this awkward slice-borrowing syntax?
+        let one = table.insert(&b"One"[..], &1.0).unwrap();
+        let _two = table.insert(&b"Dos"[..], &2.0).unwrap();
+        let _three = table.insert(&b"San"[..], &3.0).unwrap();
+        let pi = table.insert(&b"Pi"[..], &3.1415926535).unwrap();
 
-        let results : Vec<RecordID> = table.lookup_best(b"P").unwrap().collect();
+        let results : Vec<RecordID> = table.lookup_best(&b"P"[..]).unwrap().collect();
         assert_eq!(results.len(), 1);
         assert!(results.contains(&pi));
         
-        let results : Vec<RecordID> = table.lookup_fuzzy_raw(b"ne").unwrap().collect();
+        let results : Vec<RecordID> = table.lookup_fuzzy_raw(&b"ne"[..]).unwrap().collect();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], one);
     }

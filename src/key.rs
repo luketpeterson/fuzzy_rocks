@@ -113,7 +113,7 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
 
 /// Implemented by all types that can be used as keys, whether they are UTF-8 encoded
 /// strings or arrays of KeyCharT
-pub trait Key<KeyCharT> : Eq + Hash + Clone + Serialize + KeyUnsafe<KeyCharT> {
+pub trait Key<KeyCharT> : Eq + Hash + Clone + KeyUnsafe<KeyCharT> {
     //TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
     //type BorrowedKey<'a> : Key<KeyCharT>;
 
@@ -129,7 +129,7 @@ pub trait Key<KeyCharT> : Eq + Hash + Clone + Serialize + KeyUnsafe<KeyCharT> {
 }
 
 /// The private unsafe accessors for the Key trait
-pub trait KeyUnsafe<KeyCharT> : Eq + Hash + Clone + Serialize {
+pub trait KeyUnsafe<KeyCharT> : Eq + Hash + Clone {
     /// This function may return a result that borrows the owned_key parameter, but the
     /// returned result may have a longer lifetime on account of the type it's called with
     unsafe fn from_owned_unsafe<'b, OwnedKeyT : OwnedKey<KeyCharT>>(owned_key : &'b OwnedKeyT) -> Self;

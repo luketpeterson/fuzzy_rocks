@@ -623,7 +623,7 @@ impl <DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, Val
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn insert(&mut self, key : &str, value : &ValueT) -> Result<RecordID, String> {
+    pub fn insert<K : Key<char>>(&mut self, key : K, value : &ValueT) -> Result<RecordID, String> {
         self.insert_internal([&key].iter().map(|key| *key), 1, value)
     }
 
@@ -666,12 +666,6 @@ impl <DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, Val
     pub fn add_keys<'a, K : Key<char>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
         self.add_keys_internal(record_id, keys.into_iter(), keys.len())
     }
-
-//GOATGOAT, Should I take a Key instead, for all of the above functions?????
-
-//GOATGOATGOAT, Need a test where I pass a Vec<char> as the key to a utf8 encoded key table
-// Need to test creating with utf-8 and finding using both exact and fuzzy, using a char vec
-// need to test creating with a char vec, and finding both exact and fuzzy, using a utf-8 string
 
     /// Removes the supplied keys from the keys associated with a record
     /// 
@@ -727,7 +721,7 @@ impl <DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, Val
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_exact(&self, key : &str) -> Result<impl Iterator<Item=RecordID>, String> {
+    pub fn lookup_exact<K : Key<char>>(&self, key : K) -> Result<impl Iterator<Item=RecordID>, String> {
         self.lookup_exact_internal(&key).map(|result_vec| result_vec.into_iter())
     }
 
@@ -738,7 +732,7 @@ impl <DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, Val
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_fuzzy_raw<'a>(&'a self, key : &'a str) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
+    pub fn lookup_fuzzy_raw<K : Key<char>>(&self, key : K) -> Result<impl Iterator<Item=RecordID>, String> {
         self.lookup_fuzzy_raw_internal(&key)
     }
 
@@ -747,7 +741,7 @@ impl <DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, Val
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_fuzzy<'a>(&'a self, key : &'a str, threshold : DistanceT) -> Result<impl Iterator<Item=(RecordID, DistanceT)> + 'a, String> {
+    pub fn lookup_fuzzy<K : Key<char>>(&self, key : K, threshold : DistanceT) -> Result<impl Iterator<Item=(RecordID, DistanceT)>, String> {
         self.lookup_fuzzy_internal(&key, Some(threshold))
     }
 
@@ -761,7 +755,7 @@ impl <DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, Val
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_best<'a>(&'a self, key : &'a str) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
+    pub fn lookup_best<K : Key<char>>(&self, key : K) -> Result<impl Iterator<Item=RecordID>, String> {
         self.lookup_best_internal(&key)
     }
 }
@@ -775,9 +769,8 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn insert(&mut self, key : &[KeyCharT], value : &ValueT) -> Result<RecordID, String> {
-        let keys_vec = vec![&key];
-        self.insert_internal(keys_vec.into_iter(), 1, value)
+    pub fn insert<K : Key<KeyCharT>>(&mut self, key : K, value : &ValueT) -> Result<RecordID, String> {
+        self.insert_internal([&key].iter().map(|key| *key), 1, value)
     }
 
     /// Retrieves a key-value pair using a RecordID
@@ -869,7 +862,7 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_exact<'a>(&'a self, key : &'a [KeyCharT]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
+    pub fn lookup_exact<K : Key<KeyCharT>>(&self, key : K) -> Result<impl Iterator<Item=RecordID>, String> {
         self.lookup_exact_internal(&key).map(|result_vec| result_vec.into_iter())
     }
 
@@ -880,7 +873,7 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_fuzzy_raw<'a>(&'a self, key : &'a [KeyCharT]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
+    pub fn lookup_fuzzy_raw<K : Key<KeyCharT>>(&self, key : K) -> Result<impl Iterator<Item=RecordID>, String> {
         self.lookup_fuzzy_raw_internal(&key)
     }
 
@@ -889,7 +882,7 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_fuzzy<'a>(&'a self, key : &'a [KeyCharT], threshold : DistanceT) -> Result<impl Iterator<Item=(RecordID, DistanceT)> + 'a, String> {
+    pub fn lookup_fuzzy<K : Key<KeyCharT>>(&self, key : K, threshold : DistanceT) -> Result<impl Iterator<Item=(RecordID, DistanceT)>, String> {
         self.lookup_fuzzy_internal(&key, Some(threshold))
     }
 
@@ -903,7 +896,7 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_best<'a>(&'a self, key : &'a [KeyCharT]) -> Result<impl Iterator<Item=RecordID> + 'a, String> {
+    pub fn lookup_best<K : Key<KeyCharT>>(&self, key : K) -> Result<impl Iterator<Item=RecordID>, String> {
         self.lookup_best_internal(&key)
     }
 }
