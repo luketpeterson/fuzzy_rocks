@@ -149,7 +149,7 @@
 //GOATGOATGOAT, write up:
 // 0.) DNA snippet example.  Look at FAStA Wikipedia article
 // 1.) How SymSpell works best with sparse key spaces, but a BK-Tree is better for dense key spaces
-// 2.) How we have "Future Work" to add a BK tree to search within a key group
+// 2.) How we have "Future Work" to add a BK tree to search within a key group GOAT.  Fuck.  Actually a BK tree in a key-group would do fuck-all without key-groups actually merging keys from multiple records.  That's the real work...  Right now, KeyGroupIDs actually subsume RecordIDs.  For the real perf gain to happen, we'd need separate index spaces.
 //      *consider adding a "k-nn query", in addition to or instead of the "best" query
 //      *Tools to detect when a parameter is tuned badly for a data set, based on known optimal
 //      ratios for certain performance counters.  Alternatively, tools to assist in performing a
@@ -159,9 +159,6 @@
 
 //TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
 // #![feature(generic_associated_types)]
-
-#[cfg(feature = "perf_counters")]
-use core::cell::Cell;
 
 mod unicode_string_helpers;
 mod bincode_helpers;
@@ -174,37 +171,9 @@ mod table_config;
 pub use table_config::{TableConfig, MAX_KEY_LENGTH, DEFAULT_UTF8_TABLE};
 mod key_groups;
 mod sym_spell;
+mod perf_counters;
 mod table;
 pub use table::{Table};
-
-/// Performance counters for optimizing [Table] parameters.
-/// 
-/// These counters don't reflect stats and totals across the whole database, rather they can
-/// be reset and therefore used to measure individual operations or sequences of operations.
-/// 
-/// NOTE: Counters are being implemented on an as-needed basis, and many are still unimplimented
-#[cfg(feature = "perf_counters")]
-#[derive(Debug, Copy, Clone)]
-struct PerfCounters {
-
-    variant_load_count : usize, //The number of times we load a variant entry from the DB during a fuzzy lookup
-    key_group_lookup_count : usize, //The number of time we load the keys from a key_group
-    keys_found_count : usize, //The number of keys we find across all records we lookup the keys for
-    max_variant_entry_refs : usize, // The number of RecordIDs in the variant with the most RecordIDs, among all variants loaded during lookups
-}
-
-#[cfg(feature = "perf_counters")]
-impl PerfCounters {
-    pub fn new() -> Self {
-        Self {
-            variant_load_count : 0,
-            key_group_lookup_count : 0,
-            keys_found_count : 0,
-            max_variant_entry_refs : 0,
-        }
-    }
-}
-
 
 
 #[cfg(test)]
@@ -561,7 +530,6 @@ mod tests {
         let mut table = Table::<u8, u8, f32, false>::new("test2.rocks", config).unwrap();
         table.reset().unwrap();
 
-        //GOAT, Is there a way to get rid of this awkward slice-borrowing syntax?
         let one = table.insert(b"One", &1.0).unwrap();
         let _two = table.insert(b"Dos", &2.0).unwrap();
         let _three = table.insert(b"San", &3.0).unwrap();
@@ -594,22 +562,30 @@ mod tests {
             //length entirely fits within config.meaningful_key_len
             table.reset_perf_counters();
             let _iter = table.lookup_exact("london").unwrap();
-            assert_eq!(table.perf_counters.get().key_group_lookup_count, 0);
+            assert_eq!(table.get_perf_counters().key_group_load_count, 0);
 
             //Test that the other counters do something...
             table.reset_perf_counters();
             let iter = table.lookup_fuzzy("london", 3).unwrap();
             let _ = iter.count();
-            assert!(table.perf_counters.get().variant_load_count > 0);
-            assert!(table.perf_counters.get().key_group_lookup_count > 0);
-            assert!(table.perf_counters.get().keys_found_count > 0);
-            assert!(table.perf_counters.get().max_variant_entry_refs > 0);
+            assert!(table.get_perf_counters().variant_lookup_count > 0);
+            assert!(table.get_perf_counters().variant_load_count > 0);
+            assert!(table.get_perf_counters().key_group_ref_count > 0);
+            assert!(table.get_perf_counters().max_variant_entry_refs > 0);
+            assert!(table.get_perf_counters().key_group_load_count > 0);
+            assert!(table.get_perf_counters().keys_found_count > 0);
+            assert!(table.get_perf_counters().distance_function_invocation_count > 0);
+            assert!(table.get_perf_counters().records_found_count > 0);
 
             //Debug Prints
-            println!("variant_load_count {}", table.perf_counters.get().variant_load_count);
-            println!("key_group_lookup_count {}", table.perf_counters.get().key_group_lookup_count);
-            println!("keys_found_count {}", table.perf_counters.get().keys_found_count);
-            println!("max_variant_entry_refs {}", table.perf_counters.get().max_variant_entry_refs);
+            println!("variant_lookup_count {}", table.get_perf_counters().variant_lookup_count);
+            println!("variant_load_count {}", table.get_perf_counters().variant_load_count);
+            println!("key_group_ref_count {}", table.get_perf_counters().key_group_ref_count);
+            println!("max_variant_entry_refs {}", table.get_perf_counters().max_variant_entry_refs);
+            println!("key_group_load_count {}", table.get_perf_counters().key_group_load_count);
+            println!("keys_found_count {}", table.get_perf_counters().keys_found_count);
+            println!("distance_function_invocation_count {}", table.get_perf_counters().distance_function_invocation_count);
+            println!("records_found_count {}", table.get_perf_counters().records_found_count);
         }
         
         #[cfg(not(feature = "perf_counters"))]

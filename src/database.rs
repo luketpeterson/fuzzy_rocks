@@ -16,6 +16,7 @@ use super::bincode_helpers::{*};
 
 use super::records::{*};
 use super::key_groups::{*};
+use super::perf_counters::{*};
 
 /// The ColumnFamily names used for the different types of data
 pub const KEYS_CF_NAME : &str = "keys";
@@ -130,7 +131,8 @@ impl DBConnection {
 
     /// Returns the keys associated with a single key group of a single specified record
     #[inline(always)]
-    pub fn get_keys_in_group<OwnedKeyT : 'static + Sized + Serialize + serde::de::DeserializeOwned>(&self, key_group : KeyGroupID) -> Result<impl Iterator<Item=OwnedKeyT>, String> {
+    #[allow(unused_variables)] //NOTE: To silence the warning about perf_counters when that code path is disabled
+    pub fn get_keys_in_group<OwnedKeyT : 'static + Sized + Serialize + serde::de::DeserializeOwned>(&self, key_group : KeyGroupID, perf_counters : &PerfCounters) -> Result<impl Iterator<Item=OwnedKeyT>, String> {
 
         //Get the keys vec by deserializing the bytes from the db
         let keys_cf_handle = self.db.cf_handle(KEYS_CF_NAME).unwrap();
@@ -140,11 +142,11 @@ impl DBConnection {
 
             #[cfg(feature = "perf_counters")]
             {
-                let mut perf_counters = self.perf_counters.get();
-                perf_counters.key_group_lookup_count += 1;
-                perf_counters.keys_found_count += keys_vec.len();
-                self.perf_counters.set(perf_counters);
-            }    
+                let mut counter_fields = perf_counters.get();
+                counter_fields.key_group_load_count += 1;
+                counter_fields.keys_found_count += keys_vec.len();
+                perf_counters.set(counter_fields);
+            }
 
             if keys_vec.len() > 0 {
                 Ok(keys_vec.into_iter())

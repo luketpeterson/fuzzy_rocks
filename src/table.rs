@@ -16,6 +16,7 @@ use super::table_config::{*};
 use super::sym_spell::{*};
 use super::key_groups::{*};
 use super::bincode_helpers::{*};
+use super::perf_counters::{*};
 
 /// A collection containing records that may be searched by `key`
 pub struct Table<KeyCharT, DistanceT, ValueT, const UTF8_KEYS : bool> {
@@ -23,8 +24,7 @@ pub struct Table<KeyCharT, DistanceT, ValueT, const UTF8_KEYS : bool> {
     db : DBConnection,
     config : TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>,
     deleted_records : Vec<RecordID>, //NOTE: Currently we don't try to hold onto deleted records across unloads, but we may change this in the future.
-    #[cfg(feature = "perf_counters")]
-    perf_counters : Cell<PerfCounters>,
+    perf_counters : PerfCounters,
     phantom_key: PhantomData<KeyCharT>,
     phantom_value: PhantomData<ValueT>,
 }
@@ -75,8 +75,7 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
             config : config,
             db,
             deleted_records : vec![],
-            #[cfg(feature = "perf_counters")]
-            perf_counters : Cell::new(PerfCounters::new()),
+            perf_counters : PerfCounters::new(),
             phantom_key : PhantomData,
             phantom_value : PhantomData
         })
@@ -118,7 +117,7 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
         for key_group in self.db.get_record_key_groups(record_id)? {
 
             //Get all the keys for the group we're removing, so we can compute all the variants
-            let keys_iter = self.db.get_keys_in_group::<<Self as TableKeyEncoding>::OwnedKeyT>(key_group)?;
+            let keys_iter = self.db.get_keys_in_group::<<Self as TableKeyEncoding>::OwnedKeyT>(key_group, &self.perf_counters)?;
             let mut variants = HashSet::new();
             for key in keys_iter {
                 let key_variants = SymSpell::<<Self as TableKeyEncoding>::OwnedKeyT, UTF8_KEYS>::variants(&key, &self.config);
@@ -177,7 +176,7 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
 
         //Get the record's existing key groups and variants, so we can figure out the
         //best places for each additional new key
-        let mut groups = KeyGroups::<<Self as TableKeyEncoding>::OwnedKeyT, UTF8_KEYS>::load_key_groups(&self.db, record_id, &self.config)?;
+        let mut groups = KeyGroups::<<Self as TableKeyEncoding>::OwnedKeyT, UTF8_KEYS>::load_key_groups(&self.db, record_id, &self.config, &self.perf_counters)?;
 
         //Clone the existing groups, so we can determine which variants were added where
         let existing_groups_variants = groups.key_group_variants.clone();
@@ -239,7 +238,7 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
         for key_group in group_ids.iter() {
             let mut deleted_keys = HashSet::new();
             let mut remaining_keys = HashSet::new();
-            for existing_key in self.db.get_keys_in_group::<<Self as TableKeyEncoding>::OwnedKeyT>(*key_group)? {
+            for existing_key in self.db.get_keys_in_group::<<Self as TableKeyEncoding>::OwnedKeyT>(*key_group, &self.perf_counters)? {
 
                 //NOTE: We know this is safe because the unsafety comes from the fact that
                 // query_key might borrow existing_key, which is temporary, while query_key's
@@ -408,18 +407,22 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
         //Create all of the potential variants based off of the "meaningful" part of the key
         let variants = SymSpell::<<Self as TableKeyEncoding>::OwnedKeyT, UTF8_KEYS>::variants(key, &self.config);
 
+        #[cfg(feature = "perf_counters")]
+        { self.perf_counters.update(|fields| fields.variant_lookup_count += variants.len() ); }
+
         //Check to see if we have entries in the "variants" database for any of the key variants
         self.db.visit_variants(variants, |variant_vec_bytes| {
 
             #[cfg(feature = "perf_counters")]
             {
                 let num_key_group_ids = bincode_vec_fixint_len(variant_vec_bytes);
-                let mut perf_counters = self.perf_counters.get();
-                perf_counters.variant_load_count += 1;
-                if perf_counters.max_variant_entry_refs < num_key_group_ids {
-                    perf_counters.max_variant_entry_refs = num_key_group_ids;
+                let mut counter_fields = self.perf_counters.get();
+                counter_fields.variant_load_count += 1;
+                counter_fields.key_group_ref_count += num_key_group_ids;
+                if counter_fields.max_variant_entry_refs < num_key_group_ids {
+                    counter_fields.max_variant_entry_refs = num_key_group_ids;
                 }
-                self.perf_counters.set(perf_counters);
+                self.perf_counters.set(counter_fields);
             }
     
             // Call the visitor for each KeyGroup we found
@@ -444,6 +447,9 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
 
         //Visit all the potential records
         self.visit_fuzzy_candidates(key, raw_visitor_closure)?;
+
+        #[cfg(feature = "perf_counters")]
+        { self.perf_counters.update(|fields| fields.records_found_count += result_set.len() ); }
 
         //Return an iterator through the HashSet we just made
         Ok(result_set.into_iter())
@@ -489,16 +495,23 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
             if !visited_groups.contains(&key_group_id) {
 
                 //Check the record's keys with the distance function and find the smallest distance
-                let mut record_keys_iter = self.db.get_keys_in_group::<<Self as TableKeyEncoding>::OwnedKeyT>(key_group_id).unwrap().into_iter();
+                let mut record_keys_iter = self.db.get_keys_in_group::<<Self as TableKeyEncoding>::OwnedKeyT>(key_group_id, &self.perf_counters).unwrap().into_iter();
+                
                 let record_key = record_keys_iter.next().unwrap(); //If we have a zero-element keys array, it's a bug elsewhere, so this unwrap should always succeed
                 let record_key_chars = record_key.move_into_buf(&mut key_chars_buf);
-                let mut smallest_distance = distance_function(&record_key_chars[..], &looup_key_chars[..]); 
+                let mut smallest_distance = distance_function(&record_key_chars[..], &looup_key_chars[..]);
+                #[cfg(feature = "perf_counters")]
+                { self.perf_counters.update(|fields| fields.distance_function_invocation_count += 1); }
+
                 for record_key in record_keys_iter {
                     let record_key_chars = record_key.move_into_buf(&mut key_chars_buf);
                     let distance = distance_function(&record_key_chars, &looup_key_chars[..]);
                     if distance < smallest_distance {
                         smallest_distance = distance;
                     }
+
+                    #[cfg(feature = "perf_counters")]
+                    { self.perf_counters.update(|fields| fields.distance_function_invocation_count += 1); }    
                 }
 
                 match threshold {
@@ -520,6 +533,9 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
 
         //Visit all the potential records
         self.visit_fuzzy_candidates(key, lookup_fuzzy_visitor_closure)?;
+
+        #[cfg(feature = "perf_counters")]
+        { self.perf_counters.update(|fields| fields.records_found_count += result_map.len() ); }
 
         //Return an iterator through the HashSet we just made
         Ok(result_map.into_iter())
@@ -595,7 +611,7 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
                     let key_group_id = KeyGroupID::from(usize::from_le_bytes(key_group_id_bytes.try_into().unwrap()));
                     
                     // Return only the KeyGroupIDs for records if their keys match the key we are looking up
-                    let mut keys_iter = self.db.get_keys_in_group::<<Self as TableKeyEncoding>::OwnedKeyT>(key_group_id).ok()?;
+                    let mut keys_iter = self.db.get_keys_in_group::<<Self as TableKeyEncoding>::OwnedKeyT>(key_group_id, &self.perf_counters).ok()?;
                     if keys_iter.any(|key| key == owned_lookup_key) {
                         Some(key_group_id)
                     } else {
@@ -633,14 +649,19 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
     fn get_keys_internal<'a>(&'a self, record_id : RecordID) -> Result<impl Iterator<Item=<Self as TableKeyEncoding>::OwnedKeyT> + 'a, String> {
 
         let key_groups_iter = self.db.get_record_key_groups(record_id)?;
-        let result_iter = key_groups_iter.flat_map(move |key_group| self.db.get_keys_in_group::<<Self as TableKeyEncoding>::OwnedKeyT>(key_group).unwrap());
+        let result_iter = key_groups_iter.flat_map(move |key_group| self.db.get_keys_in_group::<<Self as TableKeyEncoding>::OwnedKeyT>(key_group, &self.perf_counters).unwrap());
 
         Ok(result_iter)
     }
 
     #[cfg(feature = "perf_counters")]
     pub fn reset_perf_counters(&self) {
-        self.perf_counters.set(PerfCounters::new());
+        self.perf_counters.reset();
+    }
+
+    #[cfg(feature = "perf_counters")]
+    pub fn get_perf_counters(&self) -> PerfCounterFields {
+        self.perf_counters.get()
     }
 }
 

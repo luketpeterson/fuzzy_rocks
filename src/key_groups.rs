@@ -13,6 +13,7 @@ use super::database::{*};
 use super::records::{*};
 use super::sym_spell::{*};
 use super::table_config::{*};
+use super::perf_counters::{*};
 
 /// A unique identifier for a key group, which includes its RecordID
 /// 
@@ -189,7 +190,7 @@ impl <OwnedKeyT, const UTF8_KEYS : bool>KeyGroups<OwnedKeyT, UTF8_KEYS> {
     /// 
     /// This function is used when adding new keys to a record, and figuring out which groups to
     /// merge the keys into
-    pub fn load_key_groups<KeyCharT : Clone, DistanceT, ValueT>(db : &DBConnection, record_id : RecordID, config : &TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>) -> Result<Self, String> 
+    pub fn load_key_groups<KeyCharT : Clone, DistanceT, ValueT>(db : &DBConnection, record_id : RecordID, config : &TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>, perf_counters : &PerfCounters) -> Result<Self, String> 
         where
         OwnedKeyT : OwnedKey<KeyCharT = KeyCharT>,
     {
@@ -203,7 +204,7 @@ impl <OwnedKeyT, const UTF8_KEYS : bool>KeyGroups<OwnedKeyT, UTF8_KEYS> {
             let mut group_variants = HashSet::new();
 
             //Load the group's keys and loop over each one
-            for key in db.get_keys_in_group::<OwnedKeyT>(key_group)? {
+            for key in db.get_keys_in_group::<OwnedKeyT>(key_group, perf_counters)? {
 
                 //Compute the variants for the key, and merge them into the group variants
                 let key_variants = SymSpell::<OwnedKeyT, UTF8_KEYS>::variants(&key, config);
