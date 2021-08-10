@@ -653,8 +653,8 @@ impl <DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, Val
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn insert<K : Key<KeyCharT = char>>(&mut self, key : K, value : &ValueT) -> Result<RecordID, String> {
-        self.insert_internal([&key].iter().map(|key| *key), 1, value)
+    pub fn insert<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = char>>(&mut self, key : K, value : &ValueT) -> Result<RecordID, String> {
+        self.insert_internal([&key.into_key()].iter().map(|key| *key), 1, value)
     }
 
     /// Retrieves a key-value pair using a RecordID
@@ -751,8 +751,8 @@ impl <DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, Val
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_exact<K : Key<KeyCharT = char>>(&self, key : K) -> Result<impl Iterator<Item=RecordID>, String> {
-        self.lookup_exact_internal(&key).map(|result_vec| result_vec.into_iter())
+    pub fn lookup_exact<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = char>>(&self, key : K) -> Result<impl Iterator<Item=RecordID>, String> {
+        self.lookup_exact_internal(&key.into_key()).map(|result_vec| result_vec.into_iter())
     }
 
     /// Locates all records in the table with a key that is within a deletion distance of [config.max_deletes] of
@@ -762,8 +762,8 @@ impl <DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, Val
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_fuzzy_raw<K : Key<KeyCharT = char>>(&self, key : K) -> Result<impl Iterator<Item=RecordID>, String> {
-        self.lookup_fuzzy_raw_internal(&key)
+    pub fn lookup_fuzzy_raw<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = char>>(&self, key : K) -> Result<impl Iterator<Item=RecordID>, String> {
+        self.lookup_fuzzy_raw_internal(&key.into_key())
     }
 
     /// Locates all records in the table for which the supplied `distance_function` evaluates to a result smaller
@@ -771,8 +771,8 @@ impl <DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, Val
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_fuzzy<K : Key<KeyCharT = char>>(&self, key : K, threshold : DistanceT) -> Result<impl Iterator<Item=(RecordID, DistanceT)>, String> {
-        self.lookup_fuzzy_internal(&key, Some(threshold))
+    pub fn lookup_fuzzy<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = char>>(&self, key : K, threshold : DistanceT) -> Result<impl Iterator<Item=(RecordID, DistanceT)>, String> {
+        self.lookup_fuzzy_internal(&key.into_key(), Some(threshold))
     }
 
     /// Locates the record in the table for which the supplied `distance_function` evaluates to the lowest value
@@ -785,8 +785,8 @@ impl <DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, Val
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_best<K : Key<KeyCharT = char>>(&self, key : K) -> Result<impl Iterator<Item=RecordID>, String> {
-        self.lookup_best_internal(&key)
+    pub fn lookup_best<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = char>>(&self, key : K) -> Result<impl Iterator<Item=RecordID>, String> {
+        self.lookup_best_internal(&key.into_key())
     }
 }
 
@@ -799,8 +799,8 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn insert<K : Key<KeyCharT = KeyCharT>>(&mut self, key : K, value : &ValueT) -> Result<RecordID, String> {
-        self.insert_internal([&key].iter().map(|key| *key), 1, value)
+    pub fn insert<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = KeyCharT>>(&mut self, key : K, value : &ValueT) -> Result<RecordID, String> {
+        self.insert_internal([&key.into_key()].iter().map(|key| *key), 1, value)
     }
 
     /// Retrieves a key-value pair using a RecordID
@@ -892,8 +892,8 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_exact<K : Key<KeyCharT = KeyCharT>>(&self, key : K) -> Result<impl Iterator<Item=RecordID>, String> {
-        self.lookup_exact_internal(&key).map(|result_vec| result_vec.into_iter())
+    pub fn lookup_exact<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = KeyCharT>>(&self, key : K) -> Result<impl Iterator<Item=RecordID>, String> {
+        self.lookup_exact_internal(&key.into_key()).map(|result_vec| result_vec.into_iter())
     }
 
     /// Locates all records in the table with a key that is within a deletion distance of `config.max_deletes` of
@@ -903,8 +903,8 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_fuzzy_raw<K : Key<KeyCharT = KeyCharT>>(&self, key : K) -> Result<impl Iterator<Item=RecordID>, String> {
-        self.lookup_fuzzy_raw_internal(&key)
+    pub fn lookup_fuzzy_raw<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = KeyCharT>>(&self, key : K) -> Result<impl Iterator<Item=RecordID>, String> {
+        self.lookup_fuzzy_raw_internal(&key.into_key())
     }
 
     /// Locates all records in the table for which the supplied `distance_function` evaluates to a result smaller
@@ -912,8 +912,8 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_fuzzy<K : Key<KeyCharT = KeyCharT>>(&self, key : K, threshold : DistanceT) -> Result<impl Iterator<Item=(RecordID, DistanceT)>, String> {
-        self.lookup_fuzzy_internal(&key, Some(threshold))
+    pub fn lookup_fuzzy<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = KeyCharT>>(&self, key : K, threshold : DistanceT) -> Result<impl Iterator<Item=(RecordID, DistanceT)>, String> {
+        self.lookup_fuzzy_internal(&key.into_key(), Some(threshold))
     }
 
     /// Locates the record in the table for which the supplied `distance_function` evaluates to the lowest value
@@ -926,7 +926,7 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_best<K : Key<KeyCharT = KeyCharT>>(&self, key : K) -> Result<impl Iterator<Item=RecordID>, String> {
-        self.lookup_best_internal(&key)
+    pub fn lookup_best<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = KeyCharT>>(&self, key : K) -> Result<impl Iterator<Item=RecordID>, String> {
+        self.lookup_best_internal(&key.into_key())
     }
 }

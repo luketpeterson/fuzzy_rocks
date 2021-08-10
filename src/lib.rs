@@ -560,16 +560,16 @@ mod tests {
         table.reset().unwrap();
 
         //GOAT, Is there a way to get rid of this awkward slice-borrowing syntax?
-        let one = table.insert(&b"One"[..], &1.0).unwrap();
-        let _two = table.insert(&b"Dos"[..], &2.0).unwrap();
-        let _three = table.insert(&b"San"[..], &3.0).unwrap();
-        let pi = table.insert(&b"Pi"[..], &3.1415926535).unwrap();
+        let one = table.insert(b"One", &1.0).unwrap();
+        let _two = table.insert(b"Dos", &2.0).unwrap();
+        let _three = table.insert(b"San", &3.0).unwrap();
+        let pi = table.insert(b"Pi", &3.1415926535).unwrap();
 
-        let results : Vec<RecordID> = table.lookup_best(&b"P"[..]).unwrap().collect();
+        let results : Vec<RecordID> = table.lookup_best(b"P").unwrap().collect();
         assert_eq!(results.len(), 1);
         assert!(results.contains(&pi));
         
-        let results : Vec<RecordID> = table.lookup_fuzzy_raw(&b"ne"[..]).unwrap().collect();
+        let results : Vec<RecordID> = table.lookup_fuzzy_raw(b"ne").unwrap().collect();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], one);
     }
@@ -647,7 +647,7 @@ mod tests {
 //√ 10.) provide convenience fucntion called simply "get"
 //√ 11.) API that counts the number of keys that a given record has
 
-//GOATGOATGOAT, Clippy, and update documentation
+//GOATGOATGOAT, Clippy, and update documentation, and run rustfmt
 
 //GOAT Let Wolf Garbe know about my crate when I publish FuzzyRocks v0.2
 

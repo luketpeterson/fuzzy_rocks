@@ -21,7 +21,7 @@ pub trait OwnedKey : 'static + Sized + Serialize + serde::de::DeserializeOwned +
     fn move_into_buf<'a>(&'a self, buf : &'a mut Vec<Self::KeyCharT>) -> &'a Vec<Self::KeyCharT>; //NOTE: These lifetimes are like this because this method May copy the data into the supplied buffer, or just return self 
     fn borrow_vec(&self) -> Option<&[Self::KeyCharT]>;
 
-    fn from_key<K : Key + KeyUnsafe<KeyCharT = Self::KeyCharT>>(k : &K) -> Self; //GOAT KeyUnsafe is cheeze
+    fn from_key<K : Key + KeyUnsafe<KeyCharT = Self::KeyCharT>>(k : &K) -> Self; //TODO: Get rid of the KeyUnsafe trait when When GenericAssociatedTypes is stabilized
     fn from_string(s : String) -> Self;
     fn from_vec(v : Vec<Self::KeyCharT>) -> Self;
 }
@@ -82,7 +82,6 @@ impl OwnedKey for String {
 }
 
 impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned>OwnedKey for Vec<KeyCharT> 
-    // where Self : KeyUnsafe<KeyCharT = KeyCharT> //GOAT, maybe unneeded
 {
     fn as_string(&self) -> Option<String> {
         None
@@ -102,7 +101,7 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     fn borrow_vec(&self) -> Option<&[KeyCharT]> {
         Some(&self[..])
     }
-    fn from_key<K : Key + KeyUnsafe<KeyCharT = KeyCharT>>(k : &K) -> Self { //GOAT, this is cheeze, try and get rid of KeyUnsafe
+    fn from_key<K : Key + KeyUnsafe<KeyCharT = KeyCharT>>(k : &K) -> Self { //TODO: Get rid of the KeyUnsafe trait when When GenericAssociatedTypes is stabilized
         k.get_key_chars()
     }
     fn from_string(_s : String) -> Self {
@@ -113,35 +112,43 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     }
 }
 
+/// A convenience trait to automatically convert the passed argument into one of the acceptable [Key] types,
+/// if possible
+pub trait IntoKey {
+    type Key: Key;
 
-// pub trait KeyGOAT<KeyCharT> {}
+    fn into_key(self) -> Self::Key;
+}
 
-// impl <KeyCharT>KeyGOAT<KeyCharT> for &[KeyCharT] {}
+impl<K> IntoKey for K
+    where
+    K : Key
+{
+    type Key = Self;
 
-// pub trait IntoKey<KeyCharT> {
-//     type Key: KeyGOAT<KeyCharT>;
+    #[inline(always)]
+    fn into_key(self) -> Self::Key {
+        self
+    }
+}
 
-//     fn into_key(self) -> Self::Key;
-// }
+impl<'a> IntoKey for &'a String {
+    type Key = &'a str;
 
-// impl<KeyCharT, K> IntoKey<KeyCharT> for K
-//     where
-//     K : KeyGOAT<KeyCharT>
-// {
-//     type Key = Self;
+    #[inline(always)]
+    fn into_key(self) -> Self::Key {
+        self as &str
+    }
+}
 
-//     fn into_key(self) -> Self::Key {
-//         self
-//     }
-// }
+impl<'a, KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned, const SIZE: usize> IntoKey for &'a [KeyCharT; SIZE] {
+    type Key = &'a [KeyCharT];
 
-// impl<'a, KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned, const SIZE: usize> IntoKey<KeyCharT> for &'a [KeyCharT; SIZE] {
-//     type Key = &'a [KeyCharT];
-
-//     fn into_key(self) -> Self::Key {
-//         &self[..]
-//     }
-// }
+    #[inline(always)]
+    fn into_key(self) -> Self::Key {
+        &self[..]
+    }
+}
 
 /// Implemented by all types that can be used as keys, whether they are UTF-8 encoded
 /// strings or arrays of KeyCharT
@@ -175,15 +182,18 @@ impl <KeyCharT>Key for &[KeyCharT]
     //TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
     // type BorrowedKey<'a> = &'a [KeyCharT];
 
+    #[inline(always)]
     fn num_chars(&self) -> usize {
         self.len()
     }
 
+    #[inline(always)]
     fn as_bytes(&self) -> &[u8] {
         let len = self.len();
         unsafe { slice::from_raw_parts(self.as_ptr() as *const u8, size_of::<KeyCharT>() * len) }
     }
 
+    #[inline(always)]
     fn into_bytes(self) -> Vec<u8> {
 
         let mut owned_vec = self.to_vec();
@@ -196,14 +206,17 @@ impl <KeyCharT>Key for &[KeyCharT]
         result
     }
 
+    #[inline(always)]
     fn borrow_key_chars(&self) -> Option<&[KeyCharT]> {
         Some(self)
     }
 
+    #[inline(always)]
     fn get_key_chars(&self) -> Vec<KeyCharT> {
         self.to_vec()
     }
 
+    #[inline(always)]
     fn borrow_key_str(&self) -> Option<&str> {
         None
     }
@@ -234,15 +247,18 @@ impl <KeyCharT>Key for Vec<KeyCharT>
     //TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
     //type BorrowedKey<'a> = Vec<KeyCharT>;
 
+    #[inline(always)]
     fn num_chars(&self) -> usize {
         self.len()
     }
 
+    #[inline(always)]
     fn as_bytes(&self) -> &[u8] {
         let len = self.len();
         unsafe { slice::from_raw_parts(self.as_ptr() as *const u8, size_of::<KeyCharT>() * len) }
     }
 
+    #[inline(always)]
     fn into_bytes(self) -> Vec<u8> {
         let mut mut_self = self;
         let len = mut_self.len();
@@ -254,14 +270,17 @@ impl <KeyCharT>Key for Vec<KeyCharT>
         result
     }
 
+    #[inline(always)]
     fn borrow_key_chars(&self) -> Option<&[KeyCharT]> {
         Some(&self[..])
     }
 
+    #[inline(always)]
     fn get_key_chars(&self) -> Vec<KeyCharT> {
         self.clone()
     }
 
+    #[inline(always)]
     fn borrow_key_str(&self) -> Option<&str> {
         None
     }
@@ -289,27 +308,33 @@ impl Key for &str
     //TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
     // type BorrowedKey<'a> = &'a str;
 
+    #[inline(always)]
     fn num_chars(&self) -> usize {
         unicode_len(self)
     }
 
+    #[inline(always)]
     fn as_bytes(&self) -> &[u8] {
         str::as_bytes(self)
     }
 
+    #[inline(always)]
     fn into_bytes(self) -> Vec<u8> {
         let bytes_slice = str::as_bytes(self);
         bytes_slice.to_vec()
     }
 
+    #[inline(always)]
     fn borrow_key_chars(&self) -> Option<&[char]> {
         None
     }
 
+    #[inline(always)]
     fn get_key_chars(&self) -> Vec<char> {
         self.chars().collect()
     }
 
+    #[inline(always)]
     fn borrow_key_str(&self) -> Option<&str> {
         Some(self)
     }
@@ -334,26 +359,32 @@ impl Key for String
     //TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
     // type BorrowedKey<'a> = String;
 
+    #[inline(always)]
     fn num_chars(&self) -> usize {
         unicode_len(self)
     }
 
+    #[inline(always)]
     fn as_bytes(&self) -> &[u8] {
         self.as_bytes()
     }
 
+    #[inline(always)]
     fn into_bytes(self) -> Vec<u8> {
         self.into_bytes()
     }
 
+    #[inline(always)]
     fn borrow_key_chars(&self) -> Option<&[char]> {
         None
     }
 
+    #[inline(always)]
     fn get_key_chars(&self) -> Vec<char> {
         self.chars().collect()
     }
 
+    #[inline(always)]
     fn borrow_key_str(&self) -> Option<&str> {
         Some(&self)
     }
