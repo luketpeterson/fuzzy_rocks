@@ -16,8 +16,10 @@ pub struct SymSpell<OwnedKeyT, const UTF8_KEYS : bool> {
 impl <OwnedKeyT, const UTF8_KEYS : bool>SymSpell<OwnedKeyT, UTF8_KEYS> {
 
     /// Returns all of the variants of a key, for querying or adding to the variants database
-    pub fn variants<KeyCharT : Clone, DistanceT, ValueT, K : Key<KeyCharT>>(key: &K, config : &TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>) -> HashSet<Vec<u8>>
-        where OwnedKeyT : OwnedKey<KeyCharT>
+    pub fn variants<KeyCharT : Clone, DistanceT, ValueT, K>(key: &K, config : &TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>) -> HashSet<Vec<u8>>
+        where
+        OwnedKeyT : OwnedKey<KeyCharT = KeyCharT>,
+        K : Key<KeyCharT = KeyCharT>
     {
 
         let mut variants_set : HashSet<Vec<u8>> = HashSet::new();
@@ -38,8 +40,10 @@ impl <OwnedKeyT, const UTF8_KEYS : bool>SymSpell<OwnedKeyT, UTF8_KEYS> {
     }
 
     // The recursive part of the variants() function
-    pub fn variants_recursive<KeyCharT, DistanceT, ValueT, K : Key<KeyCharT>>(key: &K, edit_distance: usize, variants_set: &mut HashSet<Vec<u8>>, config : &TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>)
-        where OwnedKeyT : OwnedKey<KeyCharT>
+    pub fn variants_recursive<KeyCharT, DistanceT, ValueT, K>(key: &K, edit_distance: usize, variants_set: &mut HashSet<Vec<u8>>, config : &TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>)
+        where
+        OwnedKeyT : OwnedKey<KeyCharT = KeyCharT>,
+        K : Key<KeyCharT = KeyCharT>
     {
 
         let edit_distance = edit_distance + 1;
@@ -63,8 +67,10 @@ impl <OwnedKeyT, const UTF8_KEYS : bool>SymSpell<OwnedKeyT, UTF8_KEYS> {
     }
 
     // Returns the "meaningful" part of a key, that is used as the starting point to generate the variants
-    pub fn meaningful_key_substring<KeyCharT : Clone, DistanceT, ValueT, K : Key<KeyCharT>>(key: &K, config : &TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>) -> OwnedKeyT
-        where OwnedKeyT : OwnedKey<KeyCharT>
+    pub fn meaningful_key_substring<KeyCharT : Clone, DistanceT, ValueT, K>(key: &K, config : &TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>) -> OwnedKeyT
+        where
+        OwnedKeyT : OwnedKey<KeyCharT = KeyCharT>,
+        K : Key<KeyCharT = KeyCharT>,
     {
         if UTF8_KEYS {
             let result_string = unicode_truncate(key.borrow_key_str().unwrap(), config.meaningful_key_len);
@@ -82,8 +88,10 @@ impl <OwnedKeyT, const UTF8_KEYS : bool>SymSpell<OwnedKeyT, UTF8_KEYS> {
 
     // Returns a new owned key, that is a variant of the supplied key, without the character at the
     // specified index
-    pub fn remove_char_from_key<KeyCharT, K : Key<KeyCharT>>(key: &K, idx : usize) -> OwnedKeyT
-        where OwnedKeyT : OwnedKey<KeyCharT>
+    pub fn remove_char_from_key<KeyCharT, K>(key: &K, idx : usize) -> OwnedKeyT
+        where
+        OwnedKeyT : OwnedKey<KeyCharT = KeyCharT>,
+        K : Key<KeyCharT = KeyCharT>
     {
         if UTF8_KEYS {
             let result_string = unicode_remove_char(key.borrow_key_str().unwrap(), idx);

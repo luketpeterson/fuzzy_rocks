@@ -78,8 +78,10 @@ impl <OwnedKeyT, const UTF8_KEYS : bool>KeyGroups<OwnedKeyT, UTF8_KEYS> {
     /// 
     /// This function is the owner of the decision whether or not to add a key to an existing
     /// group or to create a new group for a key
-    pub fn add_key_to_groups<KeyCharT : Clone, DistanceT, ValueT, K : Key<KeyCharT>>(&mut self, key : &K, update_reverse_map : bool, config : &TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>) -> Result<(), String>
-        where OwnedKeyT : OwnedKey<KeyCharT>
+    pub fn add_key_to_groups<KeyCharT : Clone, DistanceT, ValueT, K>(&mut self, key : &K, update_reverse_map : bool, config : &TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>) -> Result<(), String>
+        where
+        OwnedKeyT : OwnedKey<KeyCharT = KeyCharT>,
+        K : Key<KeyCharT = KeyCharT>
     {
         
         //Make sure the key is within the maximum allowable MAX_KEY_LENGTH
@@ -167,8 +169,10 @@ impl <OwnedKeyT, const UTF8_KEYS : bool>KeyGroups<OwnedKeyT, UTF8_KEYS> {
     /// Divides a list of keys up into one or more key groups based on some criteria; the primary
     /// of which is the overlap between key variants.  Keys with more overlapping variants are more
     /// likely to belong in the same group and keys with fewer or none are less likely.
-    pub fn make_groups_from_keys<'a, KeyCharT : Clone, DistanceT, ValueT, K : Key<KeyCharT> + 'a, KeysIterT : Iterator<Item=&'a K>>(keys_iter : KeysIterT, num_keys : usize, config : &TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>) -> Result<Self, String>
-        where OwnedKeyT : OwnedKey<KeyCharT>
+    pub fn make_groups_from_keys<'a, KeyCharT : Clone, DistanceT, ValueT, K, KeysIterT : Iterator<Item=&'a K>>(keys_iter : KeysIterT, num_keys : usize, config : &TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>) -> Result<Self, String>
+        where
+        OwnedKeyT : OwnedKey<KeyCharT = KeyCharT>,
+        K : Key<KeyCharT = KeyCharT> + 'a
     {
 
         //Start with empty key groups, and add the keys one at a time
@@ -186,7 +190,8 @@ impl <OwnedKeyT, const UTF8_KEYS : bool>KeyGroups<OwnedKeyT, UTF8_KEYS> {
     /// This function is used when adding new keys to a record, and figuring out which groups to
     /// merge the keys into
     pub fn load_key_groups<KeyCharT : Clone, DistanceT, ValueT>(db : &DBConnection, record_id : RecordID, config : &TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>) -> Result<Self, String> 
-        where OwnedKeyT : OwnedKey<KeyCharT>
+        where
+        OwnedKeyT : OwnedKey<KeyCharT = KeyCharT>,
     {
 
         let mut groups = KeyGroups::new();

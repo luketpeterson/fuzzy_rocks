@@ -528,6 +528,14 @@ mod tests {
         let results : Vec<RecordID> = table.lookup_fuzzy_raw("Vendredi").unwrap().collect();
         assert_eq!(results.len(), 0);
         assert_eq!(table.keys_count(fri).unwrap(), 3);
+
+        //GOAT, This needs to be debugged
+        // let sun_japanese = table.insert("日曜日", &"Sunday".to_string()).unwrap();
+        // let key_buf = ['日', '曜', '日'];
+        // let results : Vec<RecordID> = table.lookup_exact(&key_buf[..]).unwrap().collect();
+        // assert_eq!(results.len(), 1);
+        // assert!(results.contains(&sun_japanese));
+
     }
 
     //TODO, I'd like to do a test where I reach straight to the internal Table API and pass a Vec<char>
@@ -539,6 +547,7 @@ mod tests {
     //  both exact and fuzzy lookups, with a char vec
     // 2. test creating a record with a char vec including non-ascii bytes, and finding it using both
     //  exact and fuzzy lookups with a utf-8 string
+//GOAT, actually this might be possible
 
     #[test]
     /// This test is tests some basic non-unicode key functionality.

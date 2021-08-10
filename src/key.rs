@@ -12,21 +12,21 @@ use serde::{Serialize};
 use super::unicode_string_helpers::{*};
 
 /// A private trait representing the subset of key types that are owned and therefore 'static
-pub trait OwnedKey<KeyCharT> : 'static + Sized + Serialize + serde::de::DeserializeOwned + Key<KeyCharT> {
+pub trait OwnedKey : 'static + Sized + Serialize + serde::de::DeserializeOwned + Key {
     fn as_string(&self) -> Option<String>;
     fn borrow_str(&self) -> Option<&str>;
-    fn as_vec(&self) -> Option<Vec<KeyCharT>>;
-    fn into_vec(self) -> Vec<KeyCharT>;
+    fn as_vec(&self) -> Option<Vec<Self::KeyCharT>>;
+    fn into_vec(self) -> Vec<Self::KeyCharT>;
     /// WARNING: will stomp memory if the allocated buf is smaller than self.num_chars
-    fn move_into_buf<'a>(&'a self, buf : &'a mut Vec<KeyCharT>) -> &'a Vec<KeyCharT>; //NOTE: These lifetimes are like this because this method May copy the data into the supplied buffer, or just return self 
-    fn borrow_vec(&self) -> Option<&[KeyCharT]>;
+    fn move_into_buf<'a>(&'a self, buf : &'a mut Vec<Self::KeyCharT>) -> &'a Vec<Self::KeyCharT>; //NOTE: These lifetimes are like this because this method May copy the data into the supplied buffer, or just return self 
+    fn borrow_vec(&self) -> Option<&[Self::KeyCharT]>;
 
-    fn from_key<K : Key<KeyCharT>>(k : &K) -> Self;
+    fn from_key<K : Key + KeyUnsafe<KeyCharT = Self::KeyCharT>>(k : &K) -> Self; //GOAT KeyUnsafe is cheeze
     fn from_string(s : String) -> Self;
-    fn from_vec(v : Vec<KeyCharT>) -> Self;
+    fn from_vec(v : Vec<Self::KeyCharT>) -> Self;
 }
 
-impl OwnedKey<char> for String {
+impl OwnedKey for String {
     fn as_string(&self) -> Option<String> {
         Some(self.clone())
     }
@@ -68,7 +68,7 @@ impl OwnedKey<char> for String {
     fn borrow_vec(&self) -> Option<&[char]> {
         None
     }
-    fn from_key<K : Key<char>>(k : &K) -> Self {
+    fn from_key<K : Key>(k : &K) -> Self {
         k.borrow_key_str().unwrap().to_string() //NOTE: the unwrap() will panic if called with the wrong kind of key
     }
     fn from_string(s : String) -> Self {
@@ -81,7 +81,9 @@ impl OwnedKey<char> for String {
     }
 }
 
-impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned>OwnedKey<KeyCharT> for Vec<KeyCharT> {
+impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned>OwnedKey for Vec<KeyCharT> 
+    // where Self : KeyUnsafe<KeyCharT = KeyCharT> //GOAT, maybe unneeded
+{
     fn as_string(&self) -> Option<String> {
         None
     }
@@ -100,7 +102,7 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     fn borrow_vec(&self) -> Option<&[KeyCharT]> {
         Some(&self[..])
     }
-    fn from_key<K : Key<KeyCharT>>(k : &K) -> Self {
+    fn from_key<K : Key + KeyUnsafe<KeyCharT = KeyCharT>>(k : &K) -> Self { //GOAT, this is cheeze, try and get rid of KeyUnsafe
         k.get_key_chars()
     }
     fn from_string(_s : String) -> Self {
@@ -111,17 +113,47 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     }
 }
 
+
+// pub trait KeyGOAT<KeyCharT> {}
+
+// impl <KeyCharT>KeyGOAT<KeyCharT> for &[KeyCharT] {}
+
+// pub trait IntoKey<KeyCharT> {
+//     type Key: KeyGOAT<KeyCharT>;
+
+//     fn into_key(self) -> Self::Key;
+// }
+
+// impl<KeyCharT, K> IntoKey<KeyCharT> for K
+//     where
+//     K : KeyGOAT<KeyCharT>
+// {
+//     type Key = Self;
+
+//     fn into_key(self) -> Self::Key {
+//         self
+//     }
+// }
+
+// impl<'a, KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned, const SIZE: usize> IntoKey<KeyCharT> for &'a [KeyCharT; SIZE] {
+//     type Key = &'a [KeyCharT];
+
+//     fn into_key(self) -> Self::Key {
+//         &self[..]
+//     }
+// }
+
 /// Implemented by all types that can be used as keys, whether they are UTF-8 encoded
 /// strings or arrays of KeyCharT
-pub trait Key<KeyCharT> : Eq + Hash + Clone + KeyUnsafe<KeyCharT> {
+pub trait Key : Eq + Hash + Clone + KeyUnsafe {
     //TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
     //type BorrowedKey<'a> : Key<KeyCharT>;
 
     fn num_chars(&self) -> usize;
     fn as_bytes(&self) -> &[u8];
     fn into_bytes(self) -> Vec<u8>;
-    fn borrow_key_chars(&self) -> Option<&[KeyCharT]>;
-    fn get_key_chars(&self) -> Vec<KeyCharT>;
+    fn borrow_key_chars(&self) -> Option<&[Self::KeyCharT]>;
+    fn get_key_chars(&self) -> Vec<Self::KeyCharT>;
     fn borrow_key_str(&self) -> Option<&str>;
 
     //TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
@@ -129,13 +161,14 @@ pub trait Key<KeyCharT> : Eq + Hash + Clone + KeyUnsafe<KeyCharT> {
 }
 
 /// The private unsafe accessors for the Key trait
-pub trait KeyUnsafe<KeyCharT> : Eq + Hash + Clone {
+pub trait KeyUnsafe : Eq + Hash + Clone {
+    type KeyCharT : Clone;
     /// This function may return a result that borrows the owned_key parameter, but the
     /// returned result may have a longer lifetime on account of the type it's called with
-    unsafe fn from_owned_unsafe<'b, OwnedKeyT : OwnedKey<KeyCharT>>(owned_key : &'b OwnedKeyT) -> Self;
+    unsafe fn from_owned_unsafe<'b, OwnedKeyT : OwnedKey + KeyUnsafe<KeyCharT = Self::KeyCharT>>(owned_key : &'b OwnedKeyT) -> Self;
 }
 
-impl <KeyCharT>Key<KeyCharT> for &[KeyCharT]
+impl <KeyCharT>Key for &[KeyCharT]
     where
     KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned,
 {
@@ -182,17 +215,19 @@ impl <KeyCharT>Key<KeyCharT> for &[KeyCharT]
 }
 
 //TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
-impl <'a, KeyCharT>KeyUnsafe<KeyCharT> for &'a [KeyCharT]
+impl <'a, KeyCharT>KeyUnsafe for &'a [KeyCharT]
     where
     KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned
 {
-    unsafe fn from_owned_unsafe<OwnedKeyT : OwnedKey<KeyCharT>>(owned_key : &OwnedKeyT) -> Self {
+    type KeyCharT = KeyCharT;
+
+    unsafe fn from_owned_unsafe<OwnedKeyT : OwnedKey + KeyUnsafe<KeyCharT = KeyCharT>>(owned_key : &OwnedKeyT) -> Self {
         let result = owned_key.borrow_vec().unwrap();
         transmute::<&[KeyCharT], &'a [KeyCharT]>(result)
     }
 }
 
-impl <KeyCharT>Key<KeyCharT> for Vec<KeyCharT>
+impl <KeyCharT>Key for Vec<KeyCharT>
     where
     KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned,
 {
@@ -237,17 +272,19 @@ impl <KeyCharT>Key<KeyCharT> for Vec<KeyCharT>
     // }
 }
 
-impl <KeyCharT>KeyUnsafe<KeyCharT> for Vec<KeyCharT>
+impl <KeyCharT>KeyUnsafe for Vec<KeyCharT>
     where
     KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned,
 {
-    unsafe fn from_owned_unsafe<OwnedKeyT : OwnedKey<KeyCharT>>(owned_key : &OwnedKeyT) -> Self {
+    type KeyCharT = KeyCharT;
+
+    unsafe fn from_owned_unsafe<OwnedKeyT : OwnedKey + KeyUnsafe<KeyCharT = KeyCharT>>(owned_key : &OwnedKeyT) -> Self {
         //This implementation is actually safe, but the fn prototype is unsafe
         owned_key.as_vec().unwrap()
     }
 }
 
-impl Key<char> for &str
+impl Key for &str
 {
     //TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
     // type BorrowedKey<'a> = &'a str;
@@ -283,15 +320,16 @@ impl Key<char> for &str
     // }
 }
 
-impl <'a>KeyUnsafe<char> for &'a str {
+impl <'a>KeyUnsafe for &'a str {
+    type KeyCharT = char;
 
-    unsafe fn from_owned_unsafe<OwnedKeyT : OwnedKey<char>>(owned_key : &OwnedKeyT) -> Self {
+    unsafe fn from_owned_unsafe<OwnedKeyT : OwnedKey>(owned_key : &OwnedKeyT) -> Self {
         let result = owned_key.borrow_str().unwrap();
         transmute::<&str, &'a str>(result)
     }
 }
 
-impl Key<char> for String
+impl Key for String
 {
     //TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
     // type BorrowedKey<'a> = String;
@@ -326,9 +364,10 @@ impl Key<char> for String
     // }
 }
 
-impl KeyUnsafe<char> for String {
+impl KeyUnsafe for String {
+    type KeyCharT = char;
 
-    unsafe fn from_owned_unsafe<OwnedKeyT : OwnedKey<char>>(owned_key : &OwnedKeyT) -> Self {
+    unsafe fn from_owned_unsafe<OwnedKeyT : OwnedKey>(owned_key : &OwnedKeyT) -> Self {
         //This implementation is actually safe, but the fn prototype is unsafe
         owned_key.as_string().unwrap()
     }

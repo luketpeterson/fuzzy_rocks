@@ -74,7 +74,7 @@ pub fn lookup_benchmark(c: &mut Criterion) {
             }
         }
         let fuzzy_key : String = chars_vec.into_iter().map(|the_char| the_char as char).collect();
-        let iter = table.lookup_fuzzy(&fuzzy_key, 2).unwrap();
+        let iter = table.lookup_fuzzy(&fuzzy_key as &str, 2).unwrap();
         let count = iter.count();
         if count > 0 {
             hit_count += 1;
