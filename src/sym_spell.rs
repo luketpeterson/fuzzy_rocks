@@ -73,7 +73,11 @@ impl <OwnedKeyT, const UTF8_KEYS : bool>SymSpell<OwnedKeyT, UTF8_KEYS> {
         K : Key<KeyCharT = KeyCharT>,
     {
         if UTF8_KEYS {
-            let result_string = unicode_truncate(key.borrow_key_str().unwrap(), config.meaningful_key_len);
+            let result_string = if let Some(key_str) = key.borrow_key_str() {
+                unicode_truncate(key_str, config.meaningful_key_len) //NOTE: Fast path
+            } else {
+                unicode_truncate(&key.get_key_string(), config.meaningful_key_len) //NOTE: Slow path, allocates a temp String
+            };
             OwnedKeyT::from_string(result_string)
         } else {
             let result_vec = if key.num_chars() > config.meaningful_key_len {

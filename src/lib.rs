@@ -529,25 +529,27 @@ mod tests {
         assert_eq!(results.len(), 0);
         assert_eq!(table.keys_count(fri).unwrap(), 3);
 
-        //GOAT, This needs to be debugged
-        // let sun_japanese = table.insert("日曜日", &"Sunday".to_string()).unwrap();
-        // let key_buf = ['日', '曜', '日'];
-        // let results : Vec<RecordID> = table.lookup_exact(&key_buf[..]).unwrap().collect();
-        // assert_eq!(results.len(), 1);
-        // assert!(results.contains(&sun_japanese));
+        //Test whether [char] keys get properly converted to UTF-8-encoded Strings internally
+        // when used as the key to a Table with UTF-8 key encoding.
+        let sun_japanese = table.insert("日曜日", &"Sunday".to_string()).unwrap();
+        let key_array = ['日', '曜', '日'];
+        let results : Vec<RecordID> = table.lookup_exact(&key_array).unwrap().collect();
+        assert_eq!(results.len(), 1);
+        assert!(results.contains(&sun_japanese));
+        let results : Vec<RecordID> = table.lookup_fuzzy_raw(&key_array).unwrap().collect();
+        assert_eq!(results.len(), 1);
+        assert!(results.contains(&sun_japanese));
 
+        let key_array = ['土', '曜', '日'];
+        let sat_japanese = table.insert(&key_array, &"Saturday".to_string()).unwrap();
+        let results : Vec<RecordID> = table.lookup_exact("土曜日").unwrap().collect();
+        assert_eq!(results.len(), 1);
+        assert!(results.contains(&sat_japanese));
+        let results : Vec<RecordID> = table.lookup_fuzzy_raw("土曜日").unwrap().collect();
+        assert_eq!(results.len(), 2);
+        assert!(results.contains(&sat_japanese));
+        assert!(results.contains(&sun_japanese));
     }
-
-    //TODO, I'd like to do a test where I reach straight to the internal Table API and pass a Vec<char>
-    // as the key to a utf8 encoded key table, but this isn't accessible as part of the public API.
-    // The purpose of this test would be to ensure that the conversion from UTF8 Strings and Vec<char>
-    // happened in a symmetrical way across the code base, and we weren't just getting lucky.
-    // When implementing this test, I should test it both ways.
-    // 1. test creating a record with a str key including non-ascii bytes, and then finding it using
-    //  both exact and fuzzy lookups, with a char vec
-    // 2. test creating a record with a char vec including non-ascii bytes, and finding it using both
-    //  exact and fuzzy lookups with a utf-8 string
-//GOAT, actually this might be possible
 
     #[test]
     /// This test is tests some basic non-unicode key functionality.
