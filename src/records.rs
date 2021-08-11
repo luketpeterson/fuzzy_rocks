@@ -6,7 +6,7 @@
 use serde::{Serialize, Deserialize};
 
 
-/// A unique identifier for a record within a [Table]
+/// A unique identifier for a record within a [Table](crate::Table)
 /// 
 /// NOTE: although the RecordID is 64 bits, only 44 bits can be used to address
 /// records, giving a theoretical maximum of 17.6 trillion records although

@@ -48,12 +48,20 @@ pub struct PerfCounterFields {
     pub keys_found_count : usize,
 
     /// The number of times the distance function is invoked to compare two keys during fuzzy lookups
+    /// 
+    /// The current implementation tests all keys in a key group, so this value will exactly match
+    /// [keys_found_count].  In the future, this will be optimized.
     pub distance_function_invocation_count : usize,
 
     /// The number of unique records that we found with fuzzy lookups
     /// 
     /// This counter include doesn't include records that were rejected because of a distance threshold,
     /// but does include records that didn't qualify as the "best" distance in [lookup_best].
+    /// 
+    /// The number of keys found per record can be calculated by: [keys_found_count] / [records_found_count].
+    /// Ideally we would only find one key for the record we are looking for although we must test all found
+    /// keys to find the shortest distance.  Adjusting the [group_variant_overlap_threshold] is one way to
+    /// lower this ratio, although it may hurt performance in other ways.
     pub records_found_count : usize,
 }
 

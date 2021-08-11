@@ -96,8 +96,8 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
 
     /// Deletes a record from the Table.
     /// 
-    /// A deleted record cannot be accessed or otherwise found, but the RecordID may be reassigned
-    /// using [Table::replace].
+    /// A deleted record cannot be accessed or otherwise found.  All of the record's associated keys
+    /// and the associated value may be purged from the database. 
     pub fn delete(&mut self, record_id : RecordID) -> Result<(), String> {
 
         self.delete_keys_internal(record_id)?;
@@ -672,6 +672,9 @@ impl <DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, Val
     /// This is a high-level interface to be used if multiple keys are not needed, but is
     /// functions the same as [create](Table::create)
     /// 
+    /// NOTE: Inserting the same key into a Table multiple times will result in multiple distinct
+    /// records, and all of the records will be found by lookups of that key.
+    /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn insert<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = char>>(&mut self, key : K, value : &ValueT) -> Result<RecordID, String> {
@@ -817,6 +820,9 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// This is a high-level interface to be used if multiple keys are not needed, but is
     /// functions the same as [create](Table::create)
+    /// 
+    /// NOTE: Inserting the same key into a Table multiple times will result in multiple distinct
+    /// records, and all of the records will be found by lookups of that key.
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.

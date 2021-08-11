@@ -15,33 +15,86 @@ use serde::{Serialize};
 /// The maximum number of characters allowable in a key.  Longer keys will cause an error
 pub const MAX_KEY_LENGTH : usize = 95;
 
-
 // NOTE: The #![feature(const_generics)] feature isn't stabilized and I don't want to depend on
 // any unstable features.  So instead of taking the config structure as a const parameter to
 // Table, the compile-time arguments will be passed individually using the capabilities of
 // #![feature(min_const_generics)], and I'll hide that from novice API users by allowing the
 // compiler to infer the values from phantoms in the config structure.
 
-/// The TableConfig structure specifies all of the parameters for configuring a FuzzyRocks [Table]
+/// The TableConfig structure specifies all of the parameters for configuring a FuzzyRocks [Table](crate::Table)
 /// 
-/// -KeyCharT is a generic type that specifies the unit of deletion for the SymSpell algorithm.  In
-/// a typical implementation, this is a [char] for unicode keys or a [u8] for simple ascii, although
-/// it could be a data type of another size.  KeyCharT must be a [Copy] type, i.e. be contiguous in
-/// memory and not include any references.
+/// ## Type Parameters
 /// 
-/// -DistanceT is a generic type that represents a scalar distance in the [Metric Space](https://en.wikipedia.org/wiki/Metric_space) that contains
-/// all keys in the [Table].  While it is often desireable to use fractional types to express more
+/// ### KeyCharT
+/// **`KeyCharT`** is a generic type that specifies the unit of deletion for the SymSpell algorithm.  In
+/// a typical implementation, this is a [char] for unicode keys or a [u8] for simple [ASCII](https://en.wikipedia.org/wiki/ASCII) keys,
+/// although it could be a data type of another size.  KeyCharT must implement the [Copy] trait,
+/// in other words, keys must be contiguous in memory and may not include any references.
+/// 
+/// ### DistanceT
+/// **`DistanceT`** is a generic type that represents a scalar distance in the [Metric Space](https://en.wikipedia.org/wiki/Metric_space) that contains
+/// all keys in the [Table](crate::Table).  While it is often desireable to use fractional types to express more
 /// precision than integers, the use of floating point types is discouraged on account of their
-/// inability to be reliably compared.
+/// inability to be reliably compared, so a fixed-point alternative type is superior.
 /// 
-/// -ValueT is a generic type that represents a payload value associated with a record.  ValueT must
+/// ### ValueT
+/// **`ValueT`** is a generic type that represents a payload value associated with a record.  ValueT must
 /// be able to be serialized and deserialized from the database but otherwise is not constrained.
 /// 
-/// -`UTF8_KEYS` specifies whether the keys are UTF-8 encoded strings or not.  UTF-8 encoding allows 
-/// the majority of characters to be stored with only 8 bits (as opposed to 24 bit unicode [char]s,
-/// often padded to 32 bits) which allows the database to be more efficient, with the tradeoff being
-/// higher overhead performing conversions during access.  In general, `true` is advisable if you are
-/// using unicode keys.
+/// ### UTF8_KEYS
+/// **`UTF8_KEYS`** is a `const bool` that specifies whether the keys are [UTF-8](https://en.wikipedia.org/wiki/UTF-8) encoded [Unicode](https://en.wikipedia.org/wiki/Unicode) strings or not. 
+/// 
+/// If `UTF8_KEYS = true`, common key characters will be encoded to consume only 8 bits, (as opposed to 24 bit
+/// unicode [char]s, which are often padded to 32 bits), thus improving database size and
+/// performance, but there is additional runtime overhead to encode and decode this format.  `UTF8_KEYS = true` is only allowed if `KeyCharT = char`.
+/// 
+/// If `UTF8_KEYS = false`, all keys are stored as vectors of [KeyCharT](#keychart), meaning there is no cost to encoding
+/// and decoding them, but the database performance may suffer.
+/// 
+/// In general, if your keys are unicode strings, `UTF8_KEYS = true` is advised, and if they aren't, then
+/// `UTF8_KEYS = false` is probably required.
+/// 
+/// ## Distance Function
+/// 
+/// A distance function is any function that returns a scalar distance between two keys.  The smaller the
+/// distance, the closer the match.  Two identical keys must have a distance of [zero](num_traits::Zero).  The `fuzzy` methods
+/// in this crate, such as [lookup_fuzzy](crate::Table::lookup_fuzzy), invoke the distance function to determine
+/// if two keys adequately match.
+/// 
+/// This crate includes a simple [Levenstein Distance](https://en.wikipedia.org/wiki/Levenshtein_distance) function
+/// called [edit_distance](TableConfig::edit_distance).  However, you may often want to use a different function.
+/// 
+/// One reason to use a custom distance function is to account for expected error patterns. For example:
+/// a distance function that considers likely [OCR](https://en.wikipedia.org/wiki/Optical_character_recognition)
+/// errors might consider 'lo' to be very close to 'b', '0' to be extremely close to 'O', and 'A' to be
+/// somewhat near to '^', while '!' would be much further from '@' even though the Levenstein distances
+/// tell a different story with 'lo' being two edits away from 'b' and '!' being only one edit away from
+/// '@'.
+/// 
+/// You may want to use a custom distance function that is aware of key positions on a QWERTY keyboard, and
+/// thus able to identify likely typos.  In such a distance function, '!' and '@' are now very close
+/// because they are adjacent keys.
+/// 
+/// In another example, a distance function may be used to identify words that are similar in pronunciation,
+/// like the [Soundex](https://en.wikipedia.org/wiki/Soundex) algorithm, or you may have any number of
+/// other application-specific requirements.
+/// 
+/// Another reason for a custom distance function is if your keys are not human-readable strings, in which
+/// case you may need a different interpretation of variances between keys.  For example DNA snippets could
+/// be used as keys to search for mutations.
+/// 
+/// Any distance function you choose must be compatible with SymSpell's delete-distance optimization.  In other
+/// words, you must be able to delete no more than [config.max_deletes] characters from both a given record's
+/// key and the lookup key and arrive at identical key-variants.  If your distance function is incompatible
+/// with this property then the SymSpell optimization won't work for you and you should use a different fuzzy
+/// lookup technique and a different crate.  Here is more information on the [SymSpell algorithm](https://wolfgarbe.medium.com/1000x-faster-spelling-correction-algorithm-2012-8701fcd87a5f).
+/// 
+/// Distance functions may return any scalar type, so floating point distances will work.  However, the
+/// [config.max_deletes] constant is an integer.  Records that can't be reached by deleting `config.max_deletes` characters
+/// from both the record key and the lookup key will never be evaluated by the distance function and are
+/// conceptually "too far away".  Once the distance function has been evaluated, its return value is
+/// considered the authoritative distance and the delete distance is irrelevant.
+/// 
 #[derive(Clone)]
 pub struct TableConfig<KeyCharT, DistanceT, ValueT, const UTF8_KEYS : bool> {
 
@@ -101,9 +154,8 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
         }
     }
 
-    /// An implementation of the basic Levenstein distance function, which may be passed to
-    /// [lookup_fuzzy](Table::lookup_fuzzy), [lookup_best](Table::lookup_best), or used anywhere
-    /// else a distance function is needed.
+    /// An implementation of the basic Levenstein distance function, which is used by the [DEFAULT_UTF8_TABLE]
+    /// [TableConfig], and may be used anywhere a distance function is required.
     /// 
     /// This implementation uses the Wagner-Fischer Algorithm, as it's described [here](https://en.wikipedia.org/wiki/Levenshtein_distance)
     pub fn edit_distance(key_a : &[KeyCharT], key_b : &[KeyCharT]) -> DistanceT {

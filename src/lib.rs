@@ -5,16 +5,21 @@
 //! distance function accelerated by the [SymSpell](https://github.com/wolfgarbe/SymSpell) algorithm.
 //! 
 //! The reasons to use this crate over another SymSpell implementation are:
-//! - You have non-character-based keys (e.g. DNA snippets, etc.)
+//! - You have non-standard key characters (e.g. DNA snippets, etc.)
 //! - You want to use a custom distance function
-//! - Startup time matters more than lookups-per-second
+//! - Startup time matters (You can't recompute key variants at load time)
 //! - You have millions of keys and care about memory footprint
 //! 
-//! ## Records
+//! ## Records & Keys
 //! 
-//! This crate manages records, each of which has a unique [RecordID].  Keys are used to perform fuzzy
-//! lookups but keys are not guaranteed to be unique. [Insert](Table::insert)ing the same key into a [Table]
-//! twice will result in two distinct records, and both records will be found by lookups of that key.
+//! A [Table] contains records, each of which has a unique [RecordID], and each record is associated
+//! with one or more [Key]s.  Keys are used to perform fuzzy lookups of records.  A [Key] is typically
+//! a [String] or an [&str], but may be any number of collections of [KeyCharT](TableConfig#keychart), such
+//! as a [Vec], [Array](array), or [Slice](slice).
+//! 
+//! Keys are not required to be unique in the Table and multiple records may have keys in common.  All
+//! of the lookup methods may return multiple records if the lookup key and other criteria matches
+//! more than one record in the Table.
 //! 
 //! ## Usage Example
 //! 
@@ -31,12 +36,12 @@
 //! let tue = table.insert("Tuesday", &"Kayoubi".to_string()).unwrap();
 //! let mon = table.insert("Monday", &"Getsuyoubi".to_string()).unwrap();
 //! 
-//! //Try out lookup_best, to get the closest fuzzy match
+//! //Use lookup_best, to get the closest fuzzy match
 //! let result = table.lookup_best("Bonday")
 //!     .unwrap().next().unwrap();
 //! assert_eq!(result, mon);
 //! 
-//! //Try out lookup_fuzzy, to get all matches and their distances
+//! //Use lookup_fuzzy, to get all matches and their distances
 //! let results : Vec<(RecordID, u8)> = table
 //!     .lookup_fuzzy("Tuesday", 2)
 //!     .unwrap().collect();
@@ -44,59 +49,30 @@
 //! assert!(results.contains(&(tue, 0))); //Tuesday -> Tuesday with 0 edits
 //! assert!(results.contains(&(thu, 2))); //Thursday -> Tuesday with 2 edits
 //! 
-//! //Retrieve the key and value from a record
+//! //Retrieve a key and the value from a record
 //! assert_eq!(table.get_one_key(wed).unwrap(), "Wednesday");
 //! assert_eq!(table.get_value(wed).unwrap(), "Suiyoubi");
 //! ```
 //! 
-//! Additional usage examples can be found in the tests, located at the bottom of the `src/lib.rs` file.
+//! Additional usage examples can be found in the tests, located at the bottom of the [src/lib.rs](https://github.com/luketpeterson/fuzzy_rocks/blob/main/src/lib.rs) file.
 //! 
-//! ## Distance Functions
+//! ## Table Configuration
 //! 
-//! A distance function is any function that returns a scalar distance between two keys.  The smaller the
-//! distance, the closer the match.  Two identical keys must have a distance of [zero](num_traits::Zero).  The `fuzzy` methods
-//! in this crate, such as [lookup_fuzzy](Table::lookup_fuzzy), require a distance function to be supplied.
+//! A [TableConfig] structure is passed as an argument to [Table::new].  The TableConfig specifies a number
+//! of things about the table, including:
 //! 
-//! This crate includes a simple [Levenstein Distance](https://en.wikipedia.org/wiki/Levenshtein_distance) function
-//! called [edit_distance](Table::edit_distance).  However, you may often want to use a different function.
+//! - Data Types that define the structure and representation of certain aspects of the [Table]
+//! - A Distance Function to calculate the distance between two keys in a [Metric Space](https://en.wikipedia.org/wiki/Metric_space)
+//! - Tuning Parameters to affect the performance of various operations
 //! 
-//! One reason to use a custom distance function is to account for expected variation patterns. For example:
-//! a distance function that considers likely [OCR](https://en.wikipedia.org/wiki/Optical_character_recognition)
-//! errors might consider 'lo' to be very close to 'b', '0' to be extremely close to 'O', and 'A' to be
-//! somewhat near to '^', while '#' would be much further from ',' even though the Levenstein distances
-//! tell a different story with 'lo' being two edits away from 'b' and '#' being only one edit away from
-//! ',' (comma).
+//! [DEFAULT_UTF8_TABLE] is a default [TableConfig] that covers many situations.  If you need to customize
+//! the TableConfig, more details about the type parameters and fields can be found in the documentation
+//! for [TableConfig].
 //! 
-//! You may have a different distance function to catch common typos on a QWERTY keyboard, etc.
+//! ### Unicode and UTF-8 Support
 //! 
-//! Another reason for a custom distance function is if your keys are not human-readable strings, in which
-//! case you may need a different interpretation of variances between keys.  For example DNA snippets could
-//! be used as keys.
-//! 
-//! Any distance function you choose must be compatible with SymSpell's delete-distance optimization.  In other
-//! words, you must be able to delete no more than [config.max_deletes] characters from each of the record's
-//! key and the lookup key and arrive at identical key-variants.  If your distance function is incompatible
-//! with this property then the SymSpell optimization won't work for you and you should use a different fuzzy
-//! lookup technique and a different crate.
-//! 
-//! Distance functions may return any scalar type, so floating point distances will work.  However, the
-//! [config.max_deletes] constant is an integer.  Records that can't be reached by deleting `config.max_deletes` characters
-//! from both the record key and the lookup key will never be evaluated by the distance function and are
-//! conceptually "too far away".  Once the distance function has been evaluated, its return value is
-//! considered the authoritative distance and the delete distance is irrelevant.
-//! 
-//! ## Unicode and UTF-8 Support
-//! 
-//! GOATGOAT, More to say
-//! 
-//! A [Table] may allow for unicode keys or not, depending on the value of the `UTF8_KEYS` constant used
-//! when the Table was created.
-//! 
-//! If `UTF8_KEYS` is `true`, keys may use unicode characters and multi-byte characters will still be
-//! considered as single characters for the purpose of deleting characters to create key variants.
-//! 
-//! If `UTF8_KEYS` is `false`, keys are just strings of [u8] characters.
-//! This option has better performance.
+//! A [Table] may be configured to encode keys as [UTF-8](https://en.wikipedia.org/wiki/UTF-8) or not, depending on your requirements.
+//! This is configured through the [TableConfig] object's [UTF8_KEYS](TableConfig#utf8_keys) constant.
 //! 
 //! ## Algorithm Details
 //! 
@@ -119,8 +95,6 @@
 //! 
 //! The performance will also vary greatly depending on the key distribution and the table parameters.  Keys
 //! that are distinct from eachother will lead to faster searches vs. keys that share many variants in common.
-//! 
-//! GOATGOAT, explain multi-key support
 //! 
 //! ### Tuning for Performance
 //! 
@@ -149,16 +123,30 @@
 //GOATGOATGOAT, write up:
 // 0.) DNA snippet example.  Look at FAStA Wikipedia article
 // 1.) How SymSpell works best with sparse key spaces, but a BK-Tree is better for dense key spaces
-// 2.) How we have "Future Work" to add a BK tree to search within a key group GOAT.  Fuck.  Actually a BK tree in a key-group would do fuck-all without key-groups actually merging keys from multiple records.  That's the real work...  Right now, KeyGroupIDs actually subsume RecordIDs.  For the real perf gain to happen, we'd need separate index spaces.
+// 2.) How we have "Future Work" to add a BK tree to search within a key group GOAT.  
+//          Redo the "KeyGroups" feature to support keys from different records in the same group.  The current design for KeyGroups optimizes for the case where
+//              a single record has multiple keys with overlapping variants.  This is an efficient design in the case where many proximate keys belong to the same record,
+//              as is the case when multiple spelling variations for the same word are submitted to the Table.
+//              In that case multiple references in a variant entry are replaced with a single KeyGroup reference.
+//              However, the test data makes it clear that different records with similar or identical keys (keys with many overlapping variants) is as big an issue, if not biger.
+//              This should be changed to get full benefit out of any optimizations that improve crowded key-neighborhoods, such as adding a BK-Tree inside of the KeyGroup.
+//          Fuck.  Actually a BK tree in a key-group would do fuck-all without key-groups actually merging keys from multiple records.  That's the real work...  Right now, KeyGroupIDs actually subsume RecordIDs.  For the real perf gain to happen, we'd need separate index spaces.
+//      *Also investigate multi-threading within a query, so that variant entries can be fetched and processed in parallel, leading to parallel evaluation of key groups and parallel execution of distance functions.
 //      *consider adding a "k-nn query", in addition to or instead of the "best" query
 //      *Tools to detect when a parameter is tuned badly for a data set, based on known optimal
 //      ratios for certain performance counters.  Alternatively, tools to assist in performing a
 //      config-parameter optimization process, to tune a table config to a data set.
 //      *Save the Table config to the database (and the checksum of the distance function) to
-//      detect an error when the config changes in a way that makes the database invalid
+//      detect an error when the config changes in a way that makes the database invalid.  (Also include a software version check, along with a table about version compatibility)
+//      *Remove the KeyUnsafe trait as soon as GenericAssociatedTypes is stabilized in Rust.  https://github.com/rust-lang/rust/issues/44265
+//      As soon as I can have an associated type with a lifetime that isn't on the Key trait itself, then
+//      I'll be able to return objects that have the same base type but a narrower associated lifetime, and
+//      thus eliminate the need to transmute lifetimes.
 
 //TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
 // #![feature(generic_associated_types)]
+
+//GOAT, make distance threshold param optional in public API
 
 mod unicode_string_helpers;
 mod bincode_helpers;
@@ -610,20 +598,6 @@ mod tests {
 //  optimizations to Levenstein distance function for 3x speedup
 //  value table is separate from keys in DB
 // 
-
-//GOATGOATGOAT
-//Next, Add multi-key support
-//√ 1.) Function to add a key to a record
-//√ 2.) Function to remove a key from a record
-//√ 3.) Function to insert a record with multiple keys
-//√ 4.) Separate out records table into keys table and values table
-//√ 5.) Separate calls to get a value and get an iterator for keys
-//√ 6.) Update test to insert keys for every alternative in the Geonames test
-//√ 7.) Will deprecate get_record that gets both a key and a value
-//√ 8.) Function to replace all keys on a record
-//√ 9.) Get rid of is_valid()
-//√ 10.) provide convenience fucntion called simply "get"
-//√ 11.) API that counts the number of keys that a given record has
 
 //GOATGOATGOAT, Clippy, and update documentation, and run rustfmt
 
