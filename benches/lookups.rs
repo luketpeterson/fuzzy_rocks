@@ -7,10 +7,15 @@ use fuzzy_rocks::{*};
 
 pub fn lookup_benchmark(c: &mut Criterion) {
 
-    //Initialize the table with a very big database
-    let config = TableConfig::<char, u8, i32, true>::default();
-    let table = Table::new("all_cities.geonames.rocks", config).unwrap();
-
+    //Configure and Create the FuzzyRocks Table using a very big database
+    struct Config();
+    impl TableConfig for Config {
+        type KeyCharT = char;
+        type DistanceT = u8;
+        type ValueT = i32;
+    }
+    let table = Table::<Config, true>::new("all_cities.geonames.rocks", Config()).unwrap();
+    
     c.bench_function("lookup_exact_london", |b| b.iter(|| black_box( {
         let iter = table.lookup_exact("london").unwrap();
         let _ = iter.count();

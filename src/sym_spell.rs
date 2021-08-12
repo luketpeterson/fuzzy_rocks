@@ -16,7 +16,7 @@ pub struct SymSpell<OwnedKeyT, const UTF8_KEYS : bool> {
 impl <OwnedKeyT, const UTF8_KEYS : bool>SymSpell<OwnedKeyT, UTF8_KEYS> {
 
     /// Returns all of the variants of a key, for querying or adding to the variants database
-    pub fn variants<KeyCharT : Clone, DistanceT, ValueT, K>(key: &K, config : &TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>) -> HashSet<Vec<u8>>
+    pub fn variants<KeyCharT : Clone, K, ConfigT : TableConfig>(key: &K, config : &ConfigT) -> HashSet<Vec<u8>>
         where
         OwnedKeyT : OwnedKey<KeyCharT = KeyCharT>,
         K : Key<KeyCharT = KeyCharT>
@@ -30,7 +30,7 @@ impl <OwnedKeyT, const UTF8_KEYS : bool>SymSpell<OwnedKeyT, UTF8_KEYS> {
             //We'll only build variants from the meaningful portion of the key
             let meaningful_key = Self::meaningful_key_substring(key, config);
 
-            if 0 < config.max_deletes {
+            if 0 < ConfigT::MAX_DELETES {
                 Self::variants_recursive(&meaningful_key, 0, &mut variants_set, config);
             }
             variants_set.insert(meaningful_key.into_bytes());    
@@ -40,7 +40,7 @@ impl <OwnedKeyT, const UTF8_KEYS : bool>SymSpell<OwnedKeyT, UTF8_KEYS> {
     }
 
     // The recursive part of the variants() function
-    pub fn variants_recursive<KeyCharT, DistanceT, ValueT, K>(key: &K, edit_distance: usize, variants_set: &mut HashSet<Vec<u8>>, config : &TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>)
+    pub fn variants_recursive<KeyCharT, K, ConfigT : TableConfig>(key: &K, edit_distance: usize, variants_set: &mut HashSet<Vec<u8>>, config : &ConfigT)
         where
         OwnedKeyT : OwnedKey<KeyCharT = KeyCharT>,
         K : Key<KeyCharT = KeyCharT>
@@ -56,7 +56,7 @@ impl <OwnedKeyT, const UTF8_KEYS : bool>SymSpell<OwnedKeyT, UTF8_KEYS> {
 
                 if !variants_set.contains(variant.as_bytes()) {
 
-                    if edit_distance < config.max_deletes {
+                    if edit_distance < ConfigT::MAX_DELETES {
                         Self::variants_recursive(&variant, edit_distance, variants_set, config);
                     }
 
@@ -67,21 +67,21 @@ impl <OwnedKeyT, const UTF8_KEYS : bool>SymSpell<OwnedKeyT, UTF8_KEYS> {
     }
 
     // Returns the "meaningful" part of a key, that is used as the starting point to generate the variants
-    pub fn meaningful_key_substring<KeyCharT : Clone, DistanceT, ValueT, K>(key: &K, config : &TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>) -> OwnedKeyT
+    pub fn meaningful_key_substring<KeyCharT : Clone, K, ConfigT : TableConfig>(key: &K, _config : &ConfigT) -> OwnedKeyT
         where
         OwnedKeyT : OwnedKey<KeyCharT = KeyCharT>,
         K : Key<KeyCharT = KeyCharT>,
     {
         if UTF8_KEYS {
             let result_string = if let Some(key_str) = key.borrow_key_str() {
-                unicode_truncate(key_str, config.meaningful_key_len) //NOTE: Fast path
+                unicode_truncate(key_str, ConfigT::MEANINGFUL_KEY_LEN) //NOTE: Fast path
             } else {
-                unicode_truncate(&key.get_key_string(), config.meaningful_key_len) //NOTE: Slow path, allocates a temp String
+                unicode_truncate(&key.get_key_string(), ConfigT::MEANINGFUL_KEY_LEN) //NOTE: Slow path, allocates a temp String
             };
             OwnedKeyT::from_string(result_string)
         } else {
-            let result_vec = if key.num_chars() > config.meaningful_key_len {
-                let (prefix, _remainder) = key.borrow_key_chars().unwrap().split_at(config.meaningful_key_len);
+            let result_vec = if key.num_chars() > ConfigT::MEANINGFUL_KEY_LEN {
+                let (prefix, _remainder) = key.borrow_key_chars().unwrap().split_at(ConfigT::MEANINGFUL_KEY_LEN);
                 prefix.to_vec()
             } else {
                 key.get_key_chars()

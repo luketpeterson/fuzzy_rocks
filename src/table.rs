@@ -2,8 +2,6 @@
 //! The Table module contains the main [Table] object
 //! 
 
-use core::marker::PhantomData;
-use core::hash::Hash;
 use std::collections::{HashMap, HashSet};
 
 use num_traits::Zero;
@@ -18,15 +16,24 @@ use super::key_groups::{*};
 use super::bincode_helpers::{*};
 use super::perf_counters::{*};
 
-/// A collection containing records that may be searched by `key`
-pub struct Table<KeyCharT, DistanceT, ValueT, const UTF8_KEYS : bool> {
+/// A collection containing records that may be searched using [Key]s
+///
+/// IMPLEMENTATION NOTE: Currently Rust doesn't let us bound an impl by an associated constant.  In other words
+/// the bound `ConfigT : TableConfig<UTF8_KEYS = true>` won't work, and we need to reflect the UTF8_KEYS associated
+/// constant as a const generic parameter on Table.  This is tracked by https://github.com/rust-lang/rust/issues/70256
+/// 
+/// When the following Rust language issues are resolved, I will remove the UTF8_KEYS generic constant from Table
+/// https://github.com/rust-lang/rust/issues/44580
+/// https://github.com/rust-lang/rust/issues/70256
+/// https://github.com/rust-lang/rust/issues/76560
+/// 
+/// In the meantime, the UTF8_KEYS generic constant set for the table must match the value in the config parameter.
+pub struct Table<ConfigT : TableConfig, const UTF8_KEYS : bool> {
     record_count : usize,
     db : DBConnection,
-    config : TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>,
+    config : ConfigT,
     deleted_records : Vec<RecordID>, //NOTE: Currently we don't try to hold onto deleted records across unloads, but we may change this in the future.
     perf_counters : PerfCounters,
-    phantom_key: PhantomData<KeyCharT>,
-    phantom_value: PhantomData<ValueT>,
 }
 
 /// A private trait implemented by a [Table] to provide access to the keys in the DB, 
@@ -37,20 +44,20 @@ pub struct Table<KeyCharT, DistanceT, ValueT, const UTF8_KEYS : bool> {
 pub trait TableKeyEncoding {
     type OwnedKeyT : OwnedKey;
 }
-impl <DistanceT, ValueT>TableKeyEncoding for Table<char, DistanceT, ValueT, true> {
+impl <ConfigT : TableConfig>TableKeyEncoding for Table<ConfigT, true> {
     type OwnedKeyT = String;
 }
-impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned, DistanceT, ValueT>TableKeyEncoding for Table<KeyCharT, DistanceT, ValueT, false> {
-    type OwnedKeyT = Vec<KeyCharT>;
+impl <ConfigT : TableConfig>TableKeyEncoding for Table<ConfigT, false> {
+    type OwnedKeyT = Vec<ConfigT::KeyCharT>;
 }
 
-/// The implementation of the shared parts of Table
-impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCharT, DistanceT, ValueT, UTF8_KEYS>
+/// The implementation of the shared parts of Table, that are the same regardless of UTF8_KEYS
+impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UTF8_KEYS>
     where
-    KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::DeserializeOwned,
-    DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>,
-    ValueT : 'static + Serialize + serde::de::DeserializeOwned,
-    OwnedKeyT : OwnedKey<KeyCharT = KeyCharT>,
+    ConfigT::KeyCharT : 'static + Copy + PartialEq + Serialize + serde::de::DeserializeOwned,
+    ConfigT::DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>,
+    ConfigT::ValueT : 'static + Serialize + serde::de::DeserializeOwned,
+    OwnedKeyT : OwnedKey<KeyCharT = ConfigT::KeyCharT>,
     Self : TableKeyEncoding<OwnedKeyT = OwnedKeyT>,
     {
 
@@ -62,7 +69,13 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn new(path : &str, config : TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>) -> Result<Self, String> {
+    pub fn new(path : &str, config : ConfigT) -> Result<Self, String> {
+
+        //Make sure the Config agrees with the UTF8_KEYS const generic param
+        //NOTE: this check will be unnecessary when Rust lets us bound an impl by an associated constant
+        if UTF8_KEYS != ConfigT::UTF8_KEYS {
+            panic!("Config Error! UTF8_KEYS generic constant must match ConfigT");
+        }
 
         //Open the Database
         let db = DBConnection::new(path)?;
@@ -76,8 +89,6 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
             db,
             deleted_records : vec![],
             perf_counters : PerfCounters::new(),
-            phantom_key : PhantomData,
-            phantom_value : PhantomData
         })
     }
 
@@ -120,7 +131,7 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
             let keys_iter = self.db.get_keys_in_group::<<Self as TableKeyEncoding>::OwnedKeyT>(key_group, &self.perf_counters)?;
             let mut variants = HashSet::new();
             for key in keys_iter {
-                let key_variants = SymSpell::<<Self as TableKeyEncoding>::OwnedKeyT, UTF8_KEYS>::variants(&key, &self.config);
+                let key_variants = SymSpell::<<Self as TableKeyEncoding>::OwnedKeyT, UTF8_KEYS >::variants(&key, &self.config);
                 variants.extend(key_variants);
             }
 
@@ -144,7 +155,7 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
     /// Should NEVER be called on a record that already has keys or orphaned database entries will result
     fn put_record_keys<'a, K, KeysIterT : Iterator<Item=&'a K>>(&mut self, record_id : RecordID, keys_iter : KeysIterT, num_keys : usize) -> Result<(), String>
         where
-        K : Key<KeyCharT = KeyCharT> + 'a
+        K : Key<KeyCharT = ConfigT::KeyCharT> + 'a
     {
     
         //Make groups for the keys
@@ -171,7 +182,7 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
     /// Add additional keys to a record, including creation of all associated variants
     fn add_keys_internal<'a, K, KeysIterT : Iterator<Item=&'a K>>(&mut self, record_id : RecordID, keys_iter : KeysIterT, num_keys : usize) -> Result<(), String>
         where
-        K : Key<KeyCharT = KeyCharT> + 'a
+        K : Key<KeyCharT = ConfigT::KeyCharT> + 'a
     {
 
         //Get the record's existing key groups and variants, so we can figure out the
@@ -224,7 +235,7 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
     /// key will be ignored.
     fn remove_keys_internal<K>(&mut self, record_id : RecordID, remove_keys : &HashSet<&K>) -> Result<(), String>
         where
-        K : Key<KeyCharT = KeyCharT>
+        K : Key<KeyCharT = ConfigT::KeyCharT>
     {
 
         //Get all of the existing groups
@@ -323,7 +334,7 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
     /// Replaces all of the keys in a record with the supplied keys
     fn replace_keys_internal<'a, K>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String>
         where
-        K : Key<KeyCharT = KeyCharT>
+        K : Key<KeyCharT = ConfigT::KeyCharT>
     {
 
         if keys.len() < 1 {
@@ -346,7 +357,7 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn replace_value(&mut self, record_id : RecordID, value : &ValueT) -> Result<ValueT, String> {
+    pub fn replace_value(&mut self, record_id : RecordID, value : &ConfigT::ValueT) -> Result<ConfigT::ValueT, String> {
 
         let old_value = self.db.get_value(record_id)?;
 
@@ -360,9 +371,9 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    fn insert_internal<'a, K, KeysIterT : Iterator<Item=&'a K>>(&mut self, keys_iter : KeysIterT, num_keys : usize, value : &ValueT) -> Result<RecordID, String>
+    fn insert_internal<'a, K, KeysIterT : Iterator<Item=&'a K>>(&mut self, keys_iter : KeysIterT, num_keys : usize, value : &ConfigT::ValueT) -> Result<RecordID, String>
         where
-        K : Key<KeyCharT = KeyCharT> + 'a
+        K : Key<KeyCharT = ConfigT::KeyCharT> + 'a
     {
 
         if num_keys < 1 {
@@ -397,7 +408,7 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
     /// QUESTION: should the visitor closure be able to return a bool, to mean "stop" or "keep going"?
     fn visit_fuzzy_candidates<K, F : FnMut(KeyGroupID)>(&self, key : &K, mut visitor : F) -> Result<(), String>
         where
-        K : Key<KeyCharT = KeyCharT>
+        K : Key<KeyCharT = ConfigT::KeyCharT>
     {
 
         if key.num_chars() > MAX_KEY_LENGTH {
@@ -434,7 +445,7 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
 
     fn lookup_fuzzy_raw_internal<K>(&self, key : &K) -> Result<impl Iterator<Item=RecordID>, String>
         where
-        K : Key<KeyCharT = KeyCharT>
+        K : Key<KeyCharT = ConfigT::KeyCharT>
     {
 
         //Create a new HashSet to hold all of the RecordIDs that we find
@@ -464,9 +475,9 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
     /// It would be necessary to evaluate every key group for a particular record before returning the
     /// record.  The decision not to do this is on account of the fact that [lookup_fuzzy_raw_internal]
     /// could be used instead if the caller wants a quick-to-return iterator.
-    fn lookup_fuzzy_internal<K : Key<KeyCharT = KeyCharT>>(&self, key : &K, threshold : Option<DistanceT>) -> Result<impl Iterator<Item=(RecordID, DistanceT)>, String> {
+    fn lookup_fuzzy_internal<K : Key<KeyCharT = ConfigT::KeyCharT>>(&self, key : &K, threshold : Option<ConfigT::DistanceT>) -> Result<impl Iterator<Item=(RecordID, ConfigT::DistanceT)>, String> {
 
-        let distance_function = self.config.distance_function;
+        let distance_function = ConfigT::DISTANCE_FUNCTION;
 
         //Create a new HashMap to hold all of the RecordIDs that we might want to return, and the lowest
         // distance we find for that particular record
@@ -483,7 +494,7 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
         };
 
         //pre-allocate the buffer we'll expand the key-chars into
-        let mut key_chars_buf : Vec<KeyCharT> = Vec::with_capacity(MAX_KEY_LENGTH);
+        let mut key_chars_buf : Vec<ConfigT::KeyCharT> = Vec::with_capacity(MAX_KEY_LENGTH);
 
         //Our visitor closure tests the key using the distance function and threshold
         let lookup_fuzzy_visitor_closure = |key_group_id : KeyGroupID| {
@@ -541,7 +552,7 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
         Ok(result_map.into_iter())
     }
 
-    fn lookup_best_internal<K : Key<KeyCharT = KeyCharT>>(&self, key : &K) -> Result<impl Iterator<Item=RecordID>, String> {
+    fn lookup_best_internal<K : Key<KeyCharT = ConfigT::KeyCharT>>(&self, key : &K) -> Result<impl Iterator<Item=RecordID>, String> {
 
         //First, we should check to see if lookup_exact gives us what we want.  Because if it does,
         // it's muuuuuuch faster.  If we have an exact result, no other key will be a better match
@@ -579,7 +590,7 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
     /// This function will be more efficient than a fuzzy lookup.
     fn lookup_exact_internal<K>(&self, lookup_key : &K) -> Result<Vec<RecordID>, String>
         where
-        K : Key<KeyCharT = KeyCharT>
+        K : Key<KeyCharT = ConfigT::KeyCharT>
     {
 
         let lookup_key_len = lookup_key.num_chars();
@@ -628,7 +639,7 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn get_value(&self, record_id : RecordID) -> Result<ValueT, String> {
+    pub fn get_value(&self, record_id : RecordID) -> Result<ConfigT::ValueT, String> {
         self.db.get_value(record_id)
     }
 
@@ -665,7 +676,7 @@ impl <KeyCharT, DistanceT, ValueT, OwnedKeyT, const UTF8_KEYS : bool>Table<KeyCh
     }
 }
 
-impl <DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, ValueT : 'static + Serialize + serde::de::DeserializeOwned>Table<char, DistanceT, ValueT, true> {
+impl <ConfigT : TableConfig<KeyCharT = char>>Table<ConfigT, true> {
 
     /// Inserts a new key-value pair into the table and returns the RecordID of the new record
     /// 
@@ -677,7 +688,7 @@ impl <DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, Val
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn insert<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = char>>(&mut self, key : K, value : &ValueT) -> Result<RecordID, String> {
+    pub fn insert<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = char>>(&mut self, key : K, value : &ConfigT::ValueT) -> Result<RecordID, String> {
         self.insert_internal([&key.into_key()].iter().map(|key| *key), 1, value)
     }
 
@@ -688,7 +699,7 @@ impl <DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, Val
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn get(&self, record_id : RecordID) -> Result<(String, ValueT), String> {
+    pub fn get(&self, record_id : RecordID) -> Result<(String, ConfigT::ValueT), String> {
         let key = self.get_one_key(record_id)?;
         let value = self.get_value(record_id)?;
 
@@ -707,7 +718,7 @@ impl <DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, Val
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn create<'a, K : Key<KeyCharT = char>>(&mut self, keys : &'a [K], value : &ValueT) -> Result<RecordID, String> {
+    pub fn create<'a, K : Key<KeyCharT = char>>(&mut self, keys : &'a [K], value : &ConfigT::ValueT) -> Result<RecordID, String> {
         self.insert_internal(keys.into_iter(), keys.len(), value)
     }
 
@@ -790,16 +801,16 @@ impl <DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, Val
         self.lookup_fuzzy_raw_internal(&key.into_key())
     }
 
-    /// Locates all records in the table for which the supplied `distance_function` evaluates to a result smaller
+    /// Locates all records in the table for which the Table's DISTANCE_FUNCTION(TableConfig::DISTANCE_FUNCTION) evaluates to a result smaller
     /// than the supplied `threshold` when comparing the record's key with the supplied `key`
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_fuzzy<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = char>>(&self, key : K, threshold : DistanceT) -> Result<impl Iterator<Item=(RecordID, DistanceT)>, String> {
+    pub fn lookup_fuzzy<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = char>>(&self, key : K, threshold : ConfigT::DistanceT) -> Result<impl Iterator<Item=(RecordID, ConfigT::DistanceT)>, String> {
         self.lookup_fuzzy_internal(&key.into_key(), Some(threshold))
     }
 
-    /// Locates the record in the table for which the supplied `distance_function` evaluates to the lowest value
+    /// Locates the record in the table for which the Table's DISTANCE_FUNCTION(TableConfig::DISTANCE_FUNCTION) evaluates to the lowest value
     /// when comparing the record's key with the supplied `key`.
     /// 
     /// If no matching record is found within the table's `config.max_deletes`, this method will return an error.
@@ -814,7 +825,7 @@ impl <DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, Val
     }
 }
 
-impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned, DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, ValueT : 'static + Serialize + serde::de::DeserializeOwned>Table<KeyCharT, DistanceT, ValueT, false> {
+impl <ConfigT : TableConfig>Table<ConfigT, false> {
 
     /// Inserts a new key-value pair into the table and returns the RecordID of the new record
     /// 
@@ -826,7 +837,7 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn insert<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = KeyCharT>>(&mut self, key : K, value : &ValueT) -> Result<RecordID, String> {
+    pub fn insert<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = ConfigT::KeyCharT>>(&mut self, key : K, value : &ConfigT::ValueT) -> Result<RecordID, String> {
         self.insert_internal([&key.into_key()].iter().map(|key| *key), 1, value)
     }
 
@@ -837,7 +848,7 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn get(&self, record_id : RecordID) -> Result<(Vec<KeyCharT>, ValueT), String> {
+    pub fn get(&self, record_id : RecordID) -> Result<(Vec<ConfigT::KeyCharT>, ConfigT::ValueT), String> {
         let key = self.get_one_key(record_id)?;
         let value = self.get_value(record_id)?;
 
@@ -856,7 +867,7 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn create<'a, K : Key<KeyCharT = KeyCharT>>(&mut self, keys : &'a [K], value : &ValueT) -> Result<RecordID, String> {
+    pub fn create<'a, K : Key<KeyCharT = ConfigT::KeyCharT>>(&mut self, keys : &'a [K], value : &ConfigT::ValueT) -> Result<RecordID, String> {
         let num_keys = keys.len();
         let keys_iter = keys.into_iter();
         self.insert_internal(keys_iter, num_keys, value)
@@ -868,7 +879,7 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn add_keys<'a, K : Key<KeyCharT = KeyCharT>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
+    pub fn add_keys<'a, K : Key<KeyCharT = ConfigT::KeyCharT>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
         self.add_keys_internal(record_id, keys.into_iter(), keys.len())
     }
 
@@ -882,7 +893,7 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn remove_keys<K : Key<KeyCharT = KeyCharT>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
+    pub fn remove_keys<K : Key<KeyCharT = ConfigT::KeyCharT>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
         let keys_set : HashSet<&K> = HashSet::from_iter(keys.into_iter());
         self.remove_keys_internal(record_id, &keys_set)
     }
@@ -893,7 +904,7 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn replace_keys<'a, K : Key<KeyCharT = KeyCharT>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
+    pub fn replace_keys<'a, K : Key<KeyCharT = ConfigT::KeyCharT>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
         self.replace_keys_internal(record_id, keys)
     }
 
@@ -901,7 +912,7 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn get_keys<'a>(&'a self, record_id : RecordID) -> Result<impl Iterator<Item=Vec<KeyCharT>> + 'a, String> {
+    pub fn get_keys<'a>(&'a self, record_id : RecordID) -> Result<impl Iterator<Item=Vec<ConfigT::KeyCharT>> + 'a, String> {
         self.get_keys_internal(record_id)
     }
 
@@ -910,7 +921,7 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn get_one_key(&self, record_id : RecordID) -> Result<Vec<KeyCharT>, String> {
+    pub fn get_one_key(&self, record_id : RecordID) -> Result<Vec<ConfigT::KeyCharT>, String> {
         //TODO: Perhaps we can speed this up in the future by avoiding deserializing all keys
         Ok(self.get_keys_internal(record_id)?.next().unwrap())
     }
@@ -919,7 +930,7 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_exact<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = KeyCharT>>(&self, key : K) -> Result<impl Iterator<Item=RecordID>, String> {
+    pub fn lookup_exact<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = ConfigT::KeyCharT>>(&self, key : K) -> Result<impl Iterator<Item=RecordID>, String> {
         self.lookup_exact_internal(&key.into_key()).map(|result_vec| result_vec.into_iter())
     }
 
@@ -930,20 +941,20 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_fuzzy_raw<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = KeyCharT>>(&self, key : K) -> Result<impl Iterator<Item=RecordID>, String> {
+    pub fn lookup_fuzzy_raw<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = ConfigT::KeyCharT>>(&self, key : K) -> Result<impl Iterator<Item=RecordID>, String> {
         self.lookup_fuzzy_raw_internal(&key.into_key())
     }
 
-    /// Locates all records in the table for which the supplied `distance_function` evaluates to a result smaller
+    /// Locates all records in the table for which the Table's DISTANCE_FUNCTION(TableConfig::DISTANCE_FUNCTION) evaluates to a result smaller
     /// than the supplied `threshold` when comparing the record's key with the supplied `key`
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_fuzzy<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = KeyCharT>>(&self, key : K, threshold : DistanceT) -> Result<impl Iterator<Item=(RecordID, DistanceT)>, String> {
+    pub fn lookup_fuzzy<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = ConfigT::KeyCharT>>(&self, key : K, threshold : ConfigT::DistanceT) -> Result<impl Iterator<Item=(RecordID, ConfigT::DistanceT)>, String> {
         self.lookup_fuzzy_internal(&key.into_key(), Some(threshold))
     }
 
-    /// Locates the record in the table for which the supplied `distance_function` evaluates to the lowest value
+    /// Locates the record in the table for which the Table's DISTANCE_FUNCTION(TableConfig::DISTANCE_FUNCTION) evaluates to the lowest value
     /// when comparing the record's key with the supplied `key`.
     /// 
     /// If no matching record is found within the table's `config.max_deletes`, this method will return an error.
@@ -953,7 +964,7 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_best<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = KeyCharT>>(&self, key : K) -> Result<impl Iterator<Item=RecordID>, String> {
+    pub fn lookup_best<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = ConfigT::KeyCharT>>(&self, key : K) -> Result<impl Iterator<Item=RecordID>, String> {
         self.lookup_best_internal(&key.into_key())
     }
 }

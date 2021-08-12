@@ -79,7 +79,7 @@ impl <OwnedKeyT, const UTF8_KEYS : bool>KeyGroups<OwnedKeyT, UTF8_KEYS> {
     /// 
     /// This function is the owner of the decision whether or not to add a key to an existing
     /// group or to create a new group for a key
-    pub fn add_key_to_groups<KeyCharT : Clone, DistanceT, ValueT, K>(&mut self, key : &K, update_reverse_map : bool, config : &TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>) -> Result<(), String>
+    pub fn add_key_to_groups<KeyCharT : Clone, K, ConfigT : TableConfig>(&mut self, key : &K, update_reverse_map : bool, config : &ConfigT) -> Result<(), String>
         where
         OwnedKeyT : OwnedKey<KeyCharT = KeyCharT>,
         K : Key<KeyCharT = KeyCharT>
@@ -104,7 +104,7 @@ impl <OwnedKeyT, const UTF8_KEYS : bool>KeyGroups<OwnedKeyT, UTF8_KEYS> {
             create_new_group = false;
         } else {
 
-            if config.group_variant_overlap_threshold > 0 {
+            if ConfigT::GROUP_VARIANT_OVERLAP_THRESHOLD > 0 {
 
                 //Count the number of overlapping variants the key has with each existing group
                 // NOTE: It's possible the variant_reverse_lookup_map doesn't capture all of the
@@ -129,7 +129,7 @@ impl <OwnedKeyT, const UTF8_KEYS : bool>KeyGroups<OwnedKeyT, UTF8_KEYS> {
                 .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(Ordering::Equal))
                 .unwrap_or((0, 0));
                 group_idx = max_group_idx;
-                create_new_group = max_overlaps < config.group_variant_overlap_threshold; //Unless we have at least group_variant_overlap_threshold variant overlaps we'll make a new key group.
+                create_new_group = max_overlaps < ConfigT::GROUP_VARIANT_OVERLAP_THRESHOLD; //Unless we have at least GROUP_VARIANT_OVERLAP_THRESHOLD variant overlaps we'll make a new key group.
 
             } else {
                 group_idx = 0;
@@ -170,7 +170,7 @@ impl <OwnedKeyT, const UTF8_KEYS : bool>KeyGroups<OwnedKeyT, UTF8_KEYS> {
     /// Divides a list of keys up into one or more key groups based on some criteria; the primary
     /// of which is the overlap between key variants.  Keys with more overlapping variants are more
     /// likely to belong in the same group and keys with fewer or none are less likely.
-    pub fn make_groups_from_keys<'a, KeyCharT : Clone, DistanceT, ValueT, K, KeysIterT : Iterator<Item=&'a K>>(keys_iter : KeysIterT, num_keys : usize, config : &TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>) -> Result<Self, String>
+    pub fn make_groups_from_keys<'a, KeyCharT : Clone, K, KeysIterT : Iterator<Item=&'a K>, ConfigT : TableConfig>(keys_iter : KeysIterT, num_keys : usize, config : &ConfigT) -> Result<Self, String>
         where
         OwnedKeyT : OwnedKey<KeyCharT = KeyCharT>,
         K : Key<KeyCharT = KeyCharT> + 'a
@@ -190,7 +190,7 @@ impl <OwnedKeyT, const UTF8_KEYS : bool>KeyGroups<OwnedKeyT, UTF8_KEYS> {
     /// 
     /// This function is used when adding new keys to a record, and figuring out which groups to
     /// merge the keys into
-    pub fn load_key_groups<KeyCharT : Clone, DistanceT, ValueT>(db : &DBConnection, record_id : RecordID, config : &TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS>, perf_counters : &PerfCounters) -> Result<Self, String> 
+    pub fn load_key_groups<KeyCharT : Clone, ConfigT : TableConfig>(db : &DBConnection, record_id : RecordID, config : &ConfigT, perf_counters : &PerfCounters) -> Result<Self, String> 
         where
         OwnedKeyT : OwnedKey<KeyCharT = KeyCharT>,
     {

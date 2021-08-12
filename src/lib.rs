@@ -27,7 +27,7 @@
 //! use fuzzy_rocks::{*};
 //! 
 //! //Create and reset the FuzzyRocks Table
-//! let mut table = Table::new("test.rocks", DEFAULT_UTF8_TABLE).unwrap();
+//! let mut table = Table::<DefaultTableConfig, true>::new("test.rocks", DefaultTableConfig()).unwrap();
 //! table.reset().unwrap();
 //!
 //! //Insert some records
@@ -58,15 +58,15 @@
 //! 
 //! ## Table Configuration
 //! 
-//! A [TableConfig] structure is passed as an argument to [Table::new].  The TableConfig specifies a number
+//! A [TableConfig] object is passed as an argument to [Table::new].  The TableConfig specifies a number
 //! of things about the table, including:
 //! 
 //! - Data Types that define the structure and representation of certain aspects of the [Table]
-//! - A Distance Function to calculate the distance between two keys in a [Metric Space](https://en.wikipedia.org/wiki/Metric_space)
 //! - Tuning Parameters to affect the performance of various operations
+//! - A Distance Function to calculate the distance between two keys in a [Metric Space](https://en.wikipedia.org/wiki/Metric_space)
 //! 
-//! [DEFAULT_UTF8_TABLE] is a default [TableConfig] that covers many situations.  If you need to customize
-//! the TableConfig, more details about the type parameters and fields can be found in the documentation
+//! [DefaultTableConfig] is a zero-sized type that implements a default [TableConfig] for UTF-8 keys.  This will be sufficient for many situations.
+//! If you need to customize the TableConfig, more details about the type parameters and fields can be found in the documentation
 //! for [TableConfig].
 //! 
 //! ### Unicode and UTF-8 Support
@@ -156,7 +156,7 @@ pub use key::Key;
 mod records;
 pub use records::RecordID;
 mod table_config;
-pub use table_config::{TableConfig, MAX_KEY_LENGTH, DEFAULT_UTF8_TABLE};
+pub use table_config::{TableConfig, DefaultTableConfig, MAX_KEY_LENGTH};
 mod key_groups;
 mod sym_spell;
 mod perf_counters;
@@ -198,9 +198,16 @@ mod tests {
 //let geonames_file_path = PathBuf::from("/Users/admin/Downloads/Geonames.org/cities500.txt");
 
     
-        //Create the FuzzyRocks Table, and clear out any records that happen to be hanging out
-        let config = TableConfig::<char, u8, i32, true>::default();
-        let mut table = Table::new("geonames.rocks", config).unwrap();
+        //Create the FuzzyRocks Table with an appropriate config
+        struct Config();
+        impl TableConfig for Config {
+            type KeyCharT = char;
+            type DistanceT = u8;
+            type ValueT = i32;
+        }
+        let mut table = Table::<Config, true>::new("geonames.rocks", Config()).unwrap();
+
+        //Clear out any records that happen to be hanging out
         table.reset().unwrap();
 
         //Data structure to parse the GeoNames TSV file into
@@ -288,8 +295,7 @@ mod tests {
         drop(london_results);
 
         //Reopen the table and confirm that "London" is still there
-        let config = TableConfig::<char, u8, i32, true>::default();
-        let table = Table::new("geonames.rocks", config).unwrap();
+        let table = Table::<Config, true>::new("geonames.rocks", Config()).unwrap();
         let london_results : Vec<i32> = table.lookup_exact("london").unwrap().map(|record_id| table.get_value(record_id).unwrap()).collect();
         assert!(london_results.contains(&2643743)); //2643743 is the geonames_id of "London"
     }
@@ -297,10 +303,17 @@ mod tests {
     #[test]
     fn fuzzy_rocks_test() {
 
-        //Create and reset the FuzzyRocks Table
-        let mut config = DEFAULT_UTF8_TABLE;
-        config.meaningful_key_len = 8;
-        let mut table = Table::<char, u8, String, true>::new("test.rocks", config).unwrap();
+        //Configure and Create the FuzzyRocks Table
+        struct Config();
+        impl TableConfig for Config {
+            type KeyCharT = char;
+            type DistanceT = u8;
+            type ValueT = String;
+            const MEANINGFUL_KEY_LEN : usize = 8;
+        }
+        let mut table = Table::<Config, true>::new("test.rocks", Config()).unwrap();
+
+        //Clear out any records that happen to be hanging out from a previous run
         table.reset().unwrap();
 
         //Insert some records
@@ -512,10 +525,19 @@ mod tests {
     /// This test is tests some basic non-unicode key functionality.
     fn non_unicode_key_test() {
 
-        let mut config = TableConfig::<u8, u8, f32, false>::default();
-        config.max_deletes = 1;
-        config.meaningful_key_len = 8;
-        let mut table = Table::<u8, u8, f32, false>::new("test2.rocks", config).unwrap();
+        //Configure and Create the FuzzyRocks Table
+        struct Config();
+        impl TableConfig for Config {
+            type KeyCharT = u8;
+            type DistanceT = u8;
+            type ValueT = f32;
+            const MAX_DELETES : usize = 1;
+            const MEANINGFUL_KEY_LEN : usize = 8;
+            const UTF8_KEYS : bool = false;
+        }
+        let mut table = Table::<Config, false>::new("test2.rocks", Config()).unwrap();
+
+        //Clear out any records that happen to be hanging out from a previous run
         table.reset().unwrap();
 
         let one = table.insert(b"One", &1.0).unwrap();
@@ -536,9 +558,14 @@ mod tests {
     /// This tests the perf-counters
     fn perf_counters_test() {
 
-        //Initialize the table with a very big database
-        let config = TableConfig::<char, u8, i32, true>::default();
-        let table = Table::new("all_cities.geonames.rocks", config).unwrap();
+        //Configure and Create the FuzzyRocks Table using a very big database
+        struct Config();
+        impl TableConfig for Config {
+            type KeyCharT = char;
+            type DistanceT = u8;
+            type ValueT = i32;
+        }
+        let table = Table::<Config, true>::new("all_cities.geonames.rocks", Config()).unwrap();
 
         //Make sure we have no pathological case of a variant for a zero-length string
         let iter = table.lookup_fuzzy_raw("").unwrap();
