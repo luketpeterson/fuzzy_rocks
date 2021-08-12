@@ -83,17 +83,23 @@ pub const MAX_KEY_LENGTH : usize = 95;
 /// case you may need a different interpretation of variances between keys.  For example DNA snippets could
 /// be used as keys to search for mutations.
 /// 
-/// Any distance function you choose must be compatible with SymSpell's delete-distance optimization.  In other
-/// words, you must be able to delete no more than [config.max_deletes] characters from both a given record's
-/// key and the lookup key and arrive at identical key-variants.  If your distance function is incompatible
-/// with this property then the SymSpell optimization won't work for you and you should use a different fuzzy
-/// lookup technique and a different crate.  Here is more information on the [SymSpell algorithm](https://wolfgarbe.medium.com/1000x-faster-spelling-correction-algorithm-2012-8701fcd87a5f).
+/// Distance functions must return [DistanceT](#distancet), which can be any scalar type and is not necessarily
+/// required to be an integer.  Confusingly, the [max_deletes](TableConfig.max_deletes) configuration
+/// parameter is an integer.  Conceptually, the SymSpell delete-distance pruning is a filter that reduces the
+/// number of candidate keys that must be tested using the distance function.  Records that can't be reached
+/// by deleting [max_deletes](TableConfig.max_deletes) characters from both the record key and the lookup key
+/// will never be evaluated by the distance function and are conceptually "too far away" from the lookup key.
 /// 
-/// Distance functions may return any scalar type, so floating point distances will work.  However, the
-/// [config.max_deletes] constant is an integer.  Records that can't be reached by deleting `config.max_deletes` characters
-/// from both the record key and the lookup key will never be evaluated by the distance function and are
-/// conceptually "too far away".  Once the distance function has been evaluated, its return value is
-/// considered the authoritative distance and the delete distance is irrelevant.
+/// Any distance function you choose must be compatible with SymSpell's delete-distance optimization.  In other
+/// words, you must be able to delete no more than [max_deletes](TableConfig.max_deletes) characters from both
+/// a given record's key and the lookup key and arrive at identical key-variants.  If your distance function
+/// is incompatible with this property then the SymSpell optimization won't work for you and you should use
+/// a different fuzzy lookup technique and a different crate.
+/// 
+/// Here is more information on the [SymSpell algorithm](https://wolfgarbe.medium.com/1000x-faster-spelling-correction-algorithm-2012-8701fcd87a5f).
+/// 
+/// Once the distance function has been evaluated, its return value is considered the authoritative distance
+/// between the two keys, and the delete distance is irrelevant from that point onwards.
 /// 
 #[derive(Clone)]
 pub struct TableConfig<KeyCharT, DistanceT, ValueT, const UTF8_KEYS : bool> {
@@ -101,14 +107,15 @@ pub struct TableConfig<KeyCharT, DistanceT, ValueT, const UTF8_KEYS : bool> {
     /// The number of deletes to store in the database for variants created
     /// by the SymSpell optimization.  If `max_deletes` is too small, the variant will not be found
     /// and therefore the `distance_function` will not have an opportunity to evaluate the match.  However,
-    /// if `max_deletes` is too large, it will hurt performance by evaluating too many candidates.
+    /// if `max_deletes` is too large, it will hurt performance by finding and evaluating too many
+    /// candidate keys.
     /// 
     /// Empirically, values near 2 seem to be good in most situations I have found.  I.e. 1 and 3 might be
     /// appropriate sometimes.  4 ends up exploding in most cases I've seen so the SymSpell logic may not
     /// be a good fit if you need to find keys 4 edits away.  0 edits is an exact match.
     pub max_deletes : usize,
 
-    /// This controls an optimization where only a subset of the key is used for creating
+    /// `meaningful_key_len` controls an optimization where only a subset of the key is used for creating
     /// variants.  For example, if `meaningful_key_len = 10` then only the first 10 characters of the key will be used
     /// to generate and search for variants.
     /// 
@@ -121,20 +128,29 @@ pub struct TableConfig<KeyCharT, DistanceT, ValueT, const UTF8_KEYS : bool> {
     /// 
     /// In a dataset where many keys share a common prefix, or where keys are organized into a namespace by
     /// concatenating strings, this optimization will cause problems and you should either pass a high number
-    /// to effectively disable it, or rework this code to use different logic to select the substring
+    /// to effectively disable it, or rework the code to use different logic to select a substring
     /// 
-    /// Lookup functions that invoke the distance function will always use the entire key, regardless of the
-    /// value of `meaningful_key_len`.
+    /// The distance function will always be invoked with the entire key, regardless of the value of
+    /// `meaningful_key_len`.
+    /// 
+    /// If this value is set too high, the number of variants in the database will increase.  If this value
+    /// is set too low, the SymSpell filtering will be less effective and the distance function will be
+    /// invoked unnecessarily, hurting performance.  However, the value of this field will not affect
+    /// the correctness of the results.
     pub meaningful_key_len : usize,
 
-    /// The number of variants a key must share with a keys in an existing key group in order for that key to
-    /// be added to the group rather than being placed into a new separate key group.
+    /// The number of variants a given key must share with the other keys in an existing key group, in
+    /// order for the key to be added to the key group rather than being placed into a new separate key
+    /// group.
     /// 
     /// NOTE: We arrived at the default value (5) empirically by testing a number of different values and
     /// observing the effects on lookup speed, DB construction speed, and DB size.  The observed data
     /// points are checked in, in the file: `misc/perf_data.txt`
     pub group_variant_overlap_threshold : usize,
+
+    /// The [Distance Function](#distance-function) used by the [Table](crate::Table).  
     pub distance_function : fn(key_a : &[KeyCharT], key_b : &[KeyCharT]) -> DistanceT,
+
     phantom_key: PhantomData<KeyCharT>,
     phantom_distance: PhantomData<DistanceT>,
     phantom_value: PhantomData<ValueT>,
@@ -142,6 +158,9 @@ pub struct TableConfig<KeyCharT, DistanceT, ValueT, const UTF8_KEYS : bool> {
 
 impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned, DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>, ValueT, const UTF8_KEYS : bool>TableConfig<KeyCharT, DistanceT, ValueT, UTF8_KEYS> {
 
+//GOAT, try making TableConfig into a trait.
+
+    /// GOAT
     pub fn default() -> Self {
         Self {
             max_deletes : 2,
@@ -154,10 +173,10 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
         }
     }
 
-    /// An implementation of the basic Levenstein distance function, which is used by the [DEFAULT_UTF8_TABLE]
-    /// [TableConfig], and may be used anywhere a distance function is required.
+    /// An implementation of the basic [Levenstein Distance](https://en.wikipedia.org/wiki/Levenshtein_distance) function, which is used by the [DEFAULT_UTF8_TABLE],
+    /// and may be used anywhere a distance function is required.
     /// 
-    /// This implementation uses the Wagner-Fischer Algorithm, as it's described [here](https://en.wikipedia.org/wiki/Levenshtein_distance)
+    /// This implementation uses the Wagner-Fischer Algorithm, as it's described [here](https://en.wikipedia.org/wiki/Wagner%E2%80%93Fischer_algorithm)
     pub fn edit_distance(key_a : &[KeyCharT], key_b : &[KeyCharT]) -> DistanceT {
 
         let m = key_a.len()+1;
@@ -218,6 +237,7 @@ impl <KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserialize
     }
 }
 
+/// GOAT
 pub const DEFAULT_UTF8_TABLE : TableConfig<char, u8, String, true> = TableConfig {
     max_deletes : 2,
     meaningful_key_len : 12,
