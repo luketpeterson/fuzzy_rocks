@@ -599,11 +599,30 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
         }
 
         let meaningful_key = SymSpell::<<Self as TableKeyEncoding>::OwnedKeyT, UTF8_KEYS>::meaningful_key_substring(lookup_key, &self.config);
+
+        //BUG!! This "meaningful_noop" code path is flawed!!!
+        // A variant could point to a key group, without it being an exact match.  For example,
+        // the key "londonia" would cause a reference to be created inside the variant entry of
+        // "london".  Then an exact lookup on "london" would also return the Record for "londonia".
+        //If there is a desire to keep this fast-path, we might have an "lookup_exactly_contains"
+        // entry point or something, which reflects the behavior of the current code path
         let meaningful_noop = meaningful_key.num_chars() == lookup_key_len;
+
+        #[cfg(feature = "perf_counters")]
+        { self.perf_counters.update(|fields| fields.variant_lookup_count += 1 ); }
 
         //Get the variant for our meaningful_key
         let mut record_ids : Vec<RecordID> = vec![];
         self.db.visit_exact_variant(meaningful_key.as_bytes(), |variant_vec_bytes| {
+
+            #[cfg(feature = "perf_counters")]
+            {
+                let num_key_group_ids = bincode_vec_fixint_len(variant_vec_bytes);
+                self.perf_counters.update(|fields| { 
+                    fields.variant_load_count += 1;
+                    fields.key_group_ref_count += num_key_group_ids;
+                } );
+            }        
 
             record_ids = if meaningful_noop {
 
@@ -784,6 +803,12 @@ impl <ConfigT : TableConfig<KeyCharT = char>>Table<ConfigT, true> {
 
     /// Locates all records in the table with keys that precisely match the key supplied
     /// 
+    /// BUG!!: In some cases, this function will return records that have keys that contain
+    /// the key searched.  For example, the search key "london" may return a record associated
+    /// with the key "londonia".  We may opt to keep this functionality as a separate function
+    /// as its performance is better than as loading the exact keys for all records is
+    /// significant overhead.
+    /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn lookup_exact<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = char>>(&self, key : K) -> Result<impl Iterator<Item=RecordID>, String> {
@@ -927,6 +952,12 @@ impl <ConfigT : TableConfig>Table<ConfigT, false> {
     }
 
     /// Locates all records in the table with keys that precisely match the key supplied
+    /// 
+    /// BUG!!: In some cases, this function will return records that have keys that contain
+    /// the key searched.  For example, the search key "london" may return a record associated
+    /// with the key "londonia".  We may opt to keep this functionality as a separate function
+    /// as its performance is better than as loading the exact keys for all records is
+    /// significant overhead.
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.

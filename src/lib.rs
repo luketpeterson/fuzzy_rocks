@@ -143,10 +143,26 @@
 //      I'll be able to return objects that have the same base type but a narrower associated lifetime, and
 //      thus eliminate the need to transmute lifetimes.
 
+//GOAT Include a docs section on the Database format, and also make reference to the future proposed formats
+
+//GOATGOAT, Document the idea that perhaps there should actually be an exact Keys database where keys or a key hash are the Rocks key.
+//  Changes involved:
+//      Add a "Keys" Rocks table, whose keys are the actual record keys themselves.  Entries here are lists of RecordIDs
+//      Should variants contain key group IDs?  or real Keys?  Real keys are more data, but it means a level of indirection isn't needed.
+//      The answer comes down to what the realistic upper bound is, for the number of keys referenced by a variant.
+//          A 12 character variant with a 26 character alphabet and a delete distance of 2 has roughly 3700 possible keys,
+//          and that number could get nuts for an alphabet linke Chinese.  But the real question is: how many of those
+//          keys exist for a typical variant?
+
 //TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
 // #![feature(generic_associated_types)]
 
 //GOAT, make distance threshold param optional in public API
+
+//GOAT, the lookup_exact_london benchmark used to be 2.3us, now it's 6.  find out what happened
+//  Check to see if reset isn't clearing all 4 tables.
+
+//GOAT Give another go to eliminating KeyUnsafe
 
 mod unicode_string_helpers;
 mod bincode_helpers;
@@ -575,6 +591,8 @@ mod tests {
         {
             //Make sure we are on the fast path that doesn't fetch the keys for the case when the key
             //length entirely fits within config.meaningful_key_len
+            //BUG!!: This optimization is probably bogus and causes additional incorrect results.  See the
+            // comment in Table::lookup_exact_internal()
             table.reset_perf_counters();
             let _iter = table.lookup_exact("london").unwrap();
             assert_eq!(table.get_perf_counters().key_group_load_count, 0);
@@ -593,6 +611,21 @@ mod tests {
             assert!(table.get_perf_counters().records_found_count > 0);
 
             //Debug Prints
+            println!("-=-=-=-=-=-=-=-=- lookup_fuzzy london test -=-=-=-=-=-=-=-=-");
+            println!("variant_lookup_count {}", table.get_perf_counters().variant_lookup_count);
+            println!("variant_load_count {}", table.get_perf_counters().variant_load_count);
+            println!("key_group_ref_count {}", table.get_perf_counters().key_group_ref_count);
+            println!("max_variant_entry_refs {}", table.get_perf_counters().max_variant_entry_refs);
+            println!("key_group_load_count {}", table.get_perf_counters().key_group_load_count);
+            println!("keys_found_count {}", table.get_perf_counters().keys_found_count);
+            println!("distance_function_invocation_count {}", table.get_perf_counters().distance_function_invocation_count);
+            println!("records_found_count {}", table.get_perf_counters().records_found_count);
+
+            //Test the perf counters with lookup_exact
+            table.reset_perf_counters();
+            let iter = table.lookup_exact("london").unwrap();
+            let _ = iter.count();
+            println!("-=-=-=-=-=-=-=-=- lookup_exact london test -=-=-=-=-=-=-=-=-");
             println!("variant_lookup_count {}", table.get_perf_counters().variant_lookup_count);
             println!("variant_load_count {}", table.get_perf_counters().variant_load_count);
             println!("key_group_ref_count {}", table.get_perf_counters().key_group_ref_count);
