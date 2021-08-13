@@ -43,7 +43,7 @@
 //! 
 //! //Use lookup_fuzzy, to get all matches and their distances
 //! let results : Vec<(RecordID, u8)> = table
-//!     .lookup_fuzzy("Tuesday", 2)
+//!     .lookup_fuzzy("Tuesday", Some(2))
 //!     .unwrap().collect();
 //! assert_eq!(results.len(), 2);
 //! assert!(results.contains(&(tue, 0))); //Tuesday -> Tuesday with 0 edits
@@ -182,8 +182,6 @@
 
 //TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
 // #![feature(generic_associated_types)]
-
-//GOAT, make distance threshold param optional in public API
 
 //GOAT, the lookup_exact_london benchmark used to be 2.3us, now it's 6.  find out what happened
 //  Check to see if reset isn't clearing all 4 tables.
@@ -386,7 +384,7 @@ mod tests {
 
         //Test lookup_fuzzy with a perfect match, using the supplied edit_distance function
         //In this case, we should only get one match within edit-distance 2
-        let results : Vec<(String, String, u8)> = table.lookup_fuzzy("Saturday", 2)
+        let results : Vec<(String, String, u8)> = table.lookup_fuzzy("Saturday", Some(2))
             .unwrap().map(|(record_id, distance)| {
                 let (key, val) = table.get(record_id).unwrap();
                 (key, val, distance)
@@ -397,7 +395,7 @@ mod tests {
         assert_eq!(results[0].2, 0);
 
         //Test lookup_fuzzy with a perfect match, but where we'll hit another imperfect match as well
-        let results : Vec<(String, String, u8)> = table.lookup_fuzzy("Tuesday", 2)
+        let results : Vec<(String, String, u8)> = table.lookup_fuzzy("Tuesday", Some(2))
             .unwrap().map(|(record_id, distance)| {
                 let (key, val) = table.get(record_id).unwrap();
                 (key, val, distance)
@@ -407,7 +405,7 @@ mod tests {
         assert!(results.contains(&("Thursday".to_string(), "Mokuyoubi".to_string(), 2)));
 
         //Test lookup_fuzzy where we should get no match
-        let results : Vec<(RecordID, u8)> = table.lookup_fuzzy("Rahu", 2).unwrap().collect();
+        let results : Vec<(RecordID, u8)> = table.lookup_fuzzy("Rahu", Some(2)).unwrap().collect();
         assert_eq!(results.len(), 0);
 
         //Test lookup_fuzzy_raw, to get all of the SymSpell Delete variants
@@ -623,7 +621,7 @@ mod tests {
 
             //Test that the other counters do something...
             table.reset_perf_counters();
-            let iter = table.lookup_fuzzy("london", 3).unwrap();
+            let iter = table.lookup_fuzzy("london", None).unwrap();
             let _ = iter.count();
             assert!(table.get_perf_counters().variant_lookup_count > 0);
             assert!(table.get_perf_counters().variant_load_count > 0);

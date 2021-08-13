@@ -52,12 +52,12 @@ pub fn lookup_benchmark(c: &mut Criterion) {
     
     //Perform the same fuzzy lookup, but iterate over all of the results
     c.bench_function("lookup_fuzzy_all_london", |b| b.iter(|| black_box( {
-        let iter = table.lookup_fuzzy("london", 2).unwrap();
+        let iter = table.lookup_fuzzy("london", Some(2)).unwrap();
         let _ = iter.count();
     })));
 
     c.bench_function("lookup_fuzzy_all_tokyo", |b| b.iter(|| black_box( {
-        let iter = table.lookup_fuzzy("tokyo", 2).unwrap();
+        let iter = table.lookup_fuzzy("tokyo", Some(2)).unwrap();
         let _ = iter.count();
     })));
 
@@ -79,7 +79,7 @@ pub fn lookup_benchmark(c: &mut Criterion) {
             }
         }
         let fuzzy_key : String = chars_vec.into_iter().map(|the_char| the_char as char).collect();
-        let iter = table.lookup_fuzzy(&fuzzy_key, 2).unwrap();
+        let iter = table.lookup_fuzzy(&fuzzy_key, None).unwrap();
         let count = iter.count();
         if count > 0 {
             hit_count += 1;

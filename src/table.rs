@@ -831,8 +831,8 @@ impl <ConfigT : TableConfig<KeyCharT = char>>Table<ConfigT, true> {
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_fuzzy<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = char>>(&self, key : K, threshold : ConfigT::DistanceT) -> Result<impl Iterator<Item=(RecordID, ConfigT::DistanceT)>, String> {
-        self.lookup_fuzzy_internal(&key.into_key(), Some(threshold))
+    pub fn lookup_fuzzy<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = char>>(&self, key : K, threshold : Option<ConfigT::DistanceT>) -> Result<impl Iterator<Item=(RecordID, ConfigT::DistanceT)>, String> {
+        self.lookup_fuzzy_internal(&key.into_key(), threshold)
     }
 
     /// Locates the record in the table for which the Table's DISTANCE_FUNCTION(TableConfig::DISTANCE_FUNCTION) evaluates to the lowest value
@@ -981,8 +981,8 @@ impl <ConfigT : TableConfig>Table<ConfigT, false> {
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn lookup_fuzzy<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = ConfigT::KeyCharT>>(&self, key : K, threshold : ConfigT::DistanceT) -> Result<impl Iterator<Item=(RecordID, ConfigT::DistanceT)>, String> {
-        self.lookup_fuzzy_internal(&key.into_key(), Some(threshold))
+    pub fn lookup_fuzzy<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = ConfigT::KeyCharT>>(&self, key : K, threshold : Option<ConfigT::DistanceT>) -> Result<impl Iterator<Item=(RecordID, ConfigT::DistanceT)>, String> {
+        self.lookup_fuzzy_internal(&key.into_key(), threshold)
     }
 
     /// Locates the record in the table for which the Table's DISTANCE_FUNCTION(TableConfig::DISTANCE_FUNCTION) evaluates to the lowest value
