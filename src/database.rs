@@ -104,7 +104,7 @@ impl DBConnection {
             let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
             let rec_data : RecordData = record_coder.deserialize(&rec_data_vec_bytes).unwrap();
 
-            if rec_data.key_groups.len() > 0 {
+            if !rec_data.key_groups.is_empty() {
                 Ok(rec_data.key_groups.into_iter().map(move |group_idx| KeyGroupID::from_record_and_idx(record_id, group_idx)))
             } else {
                 Err("Invalid record_id".to_string())
@@ -148,7 +148,7 @@ impl DBConnection {
                 perf_counters.set(counter_fields);
             }
 
-            if keys_vec.len() > 0 {
+            if !keys_vec.is_empty() {
                 Ok(keys_vec.into_iter())
             } else {
                 Err("Invalid record_id".to_string())

@@ -206,7 +206,6 @@
 //          and that number could get nuts for an alphabet linke Chinese.  But the real question is: how many of those
 //          keys exist for a typical variant?
 
-
 mod unicode_string_helpers;
 mod bincode_helpers;
 mod database;
@@ -215,7 +214,7 @@ pub use key::Key;
 mod records;
 pub use records::RecordID;
 mod table_config;
-pub use table_config::{TableConfig, DefaultTableConfig, MAX_KEY_LENGTH};
+pub use table_config::{TableConfig, DistanceFunction, DefaultTableConfig, MAX_KEY_LENGTH};
 mod key_groups;
 mod sym_spell;
 mod perf_counters;

@@ -85,7 +85,7 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
 
         Ok(Self {
             record_count,
-            config : config,
+            config,
             db,
             deleted_records : vec![],
             perf_counters : PerfCounters::new(),

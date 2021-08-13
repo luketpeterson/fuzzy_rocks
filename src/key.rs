@@ -208,7 +208,7 @@ pub trait KeyUnsafe : Eq + Hash + Clone {
     type KeyCharT : Clone;
     /// This function may return a result that borrows the owned_key parameter, but the
     /// returned result may have a longer lifetime on account of the type it's called with
-    unsafe fn from_owned_unsafe<'b, OwnedKeyT : OwnedKey + KeyUnsafe<KeyCharT = Self::KeyCharT>>(owned_key : &'b OwnedKeyT) -> Self;
+    unsafe fn from_owned_unsafe<OwnedKeyT : OwnedKey + KeyUnsafe<KeyCharT = Self::KeyCharT>>(owned_key : &OwnedKeyT) -> Self;
 }
 
 impl <KeyCharT>Key for &[KeyCharT]
@@ -451,7 +451,7 @@ impl Key for String
 
     #[inline(always)]
     fn borrow_key_str(&self) -> Option<&str> {
-        Some(&self)
+        Some(self)
     }
 
     #[inline(always)]

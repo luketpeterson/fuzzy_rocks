@@ -129,46 +129,9 @@ pub trait TableConfig {
     /// points are checked in, in the file: `misc/perf_data.txt`
     const GROUP_VARIANT_OVERLAP_THRESHOLD : usize = 5;
 
-    /// The `DISTANCE_FUNCTION` can be any function that returns a scalar distance between two keys.  The smaller the
-    /// distance, the closer the match.  Two identical keys must have a distance of [zero](num_traits::Zero).  The `fuzzy` methods
-    /// in this crate, such as [lookup_fuzzy](crate::Table::lookup_fuzzy), invoke the distance function to determine
-    /// if two keys adequately match.
-    /// 
-    /// This crate includes a simple [Levenstein Distance](https://en.wikipedia.org/wiki/Levenshtein_distance) function
-    /// called [levenstein_distance](TableConfig::levenstein_distance).  However, you may often want to use a different function.
-    /// 
-    /// One reason to use a custom distance function is to account for expected error patterns. For example:
-    /// a distance function that considers likely [OCR](https://en.wikipedia.org/wiki/Optical_character_recognition)
-    /// errors might consider 'lo' to be very close to 'b', '0' to be extremely close to 'O', and 'A' to be
-    /// somewhat near to '^', while '!' would be much further from '@' even though the Levenstein distances
-    /// tell a different story with 'lo' being two edits away from 'b' and '!' being only one edit away from
-    /// '@'.
-    /// 
-    /// In another situation, you may want to use a custom distance function that is aware of key positions on a QWERTY keyboard, and
-    /// thus able to identify likely typos.  In such a distance function, '!' and '@' are now very close
-    /// because they are adjacent keys.
-    /// 
-    /// In another example, a distance function may be used to identify words that are similar in pronunciation,
-    /// like the [Soundex](https://en.wikipedia.org/wiki/Soundex) algorithm, or you may have any number of
-    /// other application-specific requirements.
-    /// 
-    /// Another reason for a custom distance function is if your keys are not human-readable strings, in which
-    /// case you may need a different interpretation of variances between keys.  For example DNA snippets could
-    /// be used as keys to search for genetic mutations.
-    /// 
-    /// Distance functions must return a [DistanceT](TableConfig::DistanceT).
-    /// 
-    /// Any distance function you choose must be compatible with SymSpell's delete-distance optimization.  In other
-    /// words, you must be able to delete no more than [MAX_DELETES](TableConfig::MAX_DELETES) characters from both
-    /// a given record's key and the lookup key and arrive at identical key-variants.  If your distance function
-    /// is incompatible with this property then the SymSpell optimization won't work for you and you should use
-    /// a different fuzzy lookup technique and a different crate.
-    /// 
-    /// Here is more information on the [SymSpell algorithm](https://wolfgarbe.medium.com/1000x-faster-spelling-correction-algorithm-2012-8701fcd87a5f).
-    /// 
-    /// Once the distance function has been evaluated, its return value is considered the authoritative distance
-    /// between the two keys, and the delete distance is irrelevant from that point onwards.
-    const DISTANCE_FUNCTION : fn(key_a : &[Self::KeyCharT], key_b : &[Self::KeyCharT]) -> Self::DistanceT = Self::levenstein_distance;
+    /// The `DISTANCE_FUNCTION` is a [DistanceFunction] associated with a [Table](crate::Table) and defines
+    /// the [Metric Space](https://en.wikipedia.org/wiki/Metric_space) that contains all [Key](crate::Key)s in the Table.
+    const DISTANCE_FUNCTION : DistanceFunction<Self::KeyCharT, Self::DistanceT> = Self::levenstein_distance;
 
     /// An implementation of the basic [Levenstein Distance](https://en.wikipedia.org/wiki/Levenshtein_distance) function, which is used by the [DefaultTableConfig],
     /// and may be used anywhere a distance function is required.
@@ -233,6 +196,49 @@ pub trait TableConfig {
         Self::DistanceT::from(d[m-1][n-1])
     }
 }
+
+/// A function type for a function to compute the distance between two keys. 
+/// 
+/// A `DistanceFunction` can be any function that returns a scalar distance when given two keys.  The smaller the
+/// distance, the closer the match.  Two identical keys must have a distance of [zero](num_traits::Zero).  The `fuzzy` methods
+/// in this crate, such as [lookup_fuzzy](crate::Table::lookup_fuzzy), invoke the distance function to determine
+/// if two keys adequately match.
+/// 
+/// This crate includes a simple [Levenstein Distance](https://en.wikipedia.org/wiki/Levenshtein_distance) function
+/// called [levenstein_distance](TableConfig::levenstein_distance).  However, you may often want to use a different function.
+/// 
+/// One reason to use a custom distance function is to account for expected error patterns. For example:
+/// a distance function that considers likely [OCR](https://en.wikipedia.org/wiki/Optical_character_recognition)
+/// errors might consider 'lo' to be very close to 'b', '0' to be extremely close to 'O', and 'A' to be
+/// somewhat near to '^', while '!' would be much further from '@' even though the Levenstein distances
+/// tell a different story with 'lo' being two edits away from 'b' and '!' being only one edit away from
+/// '@'.
+/// 
+/// In another situation, you may want to use a custom distance function that is aware of key positions on a QWERTY keyboard, and
+/// thus able to identify likely typos.  In such a distance function, '!' and '@' are now very close
+/// because they are adjacent keys.
+/// 
+/// In another example, a distance function may be used to identify words that are similar in pronunciation,
+/// like the [Soundex](https://en.wikipedia.org/wiki/Soundex) algorithm, or you may have any number of
+/// other application-specific requirements.
+/// 
+/// Another reason for a custom distance function is if your keys are not human-readable strings, in which
+/// case you may need a different interpretation of variances between keys.  For example DNA snippets could
+/// be used as keys to search for genetic mutations.
+/// 
+/// Distance functions must return a [DistanceT](TableConfig::DistanceT).
+/// 
+/// Any distance function you choose must be compatible with SymSpell's delete-distance optimization.  In other
+/// words, you must be able to delete no more than [MAX_DELETES](TableConfig::MAX_DELETES) characters from both
+/// a given record's key and the lookup key and arrive at identical key-variants.  If your distance function
+/// is incompatible with this property then the SymSpell optimization won't work for you and you should use
+/// a different fuzzy lookup technique and a different crate.
+/// 
+/// Here is more information on the [SymSpell algorithm](https://wolfgarbe.medium.com/1000x-faster-spelling-correction-algorithm-2012-8701fcd87a5f).
+/// 
+/// Once the distance function has been evaluated, its return value is considered the authoritative distance
+/// between the two keys, and the delete distance is irrelevant from that point onwards.
+pub type DistanceFunction<KeyCharT, DistanceT> = fn(key_a : &[KeyCharT], key_b : &[KeyCharT]) -> DistanceT;
 
 /// A struct that implements [TableConfig] with default values.  This can be passed as a convenience
 /// when a default configuration for [Table](crate::Table) is acceptable
