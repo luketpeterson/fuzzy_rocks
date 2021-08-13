@@ -120,6 +120,24 @@
 //! 
 //! GOAT
 //! 
+//! ## Release History
+//! 
+//! ### 0.2.0
+//! - Multi-key support. Records may now be associated with more than one key
+//! - Lookup_best now returns an iterator instead of one arbitrarily-chosen record
+//! - Support for Keys composed of a generic KeyCharT type, vs. only ASCII or UTF-8
+//! - Central TableConfig trait to centralize all tuning parameters
+//! - Added micro-benchmarks using Criterion
+//! - Added `perf_counters` feature
+//! - Massive performance optimizations for lookups (10x-100x) in some cases
+//!     - lookup_best checks lookup_exact first before more expensive lookup_fuzzy
+//!     - key_groups mingle similar keys for a record
+//!     - micro-optimizations to levenstein_distance function for 3x speedup
+//!     - record value stored separately from keys in DB, so Value isn't parsed unnecessarily
+//! 
+//! ### 0.1.1
+//! - Initial Release
+//! 
 //! ## Misc
 //! 
 //! **NOTE**: The included `geonames_megacities.txt` file is a stub for the `geonames_test`, designed to stress-test
@@ -651,19 +669,6 @@ mod tests {
     }
 
 }
-
-//GOATGOATGOAT
-//Features since last push to crates.io:
-// Multi-key support
-// lookup_best now returns an iterator instead of one arbitrarily-chosen record
-// Support for a generic character type in key
-// Adding micro-benchmarks using criterion
-// Massive Perf optimizations for lookups
-//  lookup_best checks lookup_exact first before more expensive lookup_fuzzy
-//  key groups mingle similar keys for a record
-//  optimizations to Levenstein distance function for 3x speedup
-//  value table is separate from keys in DB
-// 
 
 //GOATGOATGOAT, Clippy, and update documentation, and run rustfmt
 
