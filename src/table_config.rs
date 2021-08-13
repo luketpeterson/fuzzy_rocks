@@ -22,101 +22,67 @@ pub const MAX_KEY_LENGTH : usize = 95;
 
 /// The TableConfig structure specifies all of the parameters for configuring a FuzzyRocks [Table](crate::Table)
 /// 
-/// GOATGOAT, include example using a custom TableConfig
+/// ## An example creating a [Table](crate::Table) using a custom [TableConfig]
+/// ```
+/// use fuzzy_rocks::{*};
 /// 
-/// ## Type Parameters
-/// 
-/// ### KeyCharT
-/// **`KeyCharT`** is a generic type that specifies the unit of deletion for the SymSpell algorithm.  In
-/// a typical implementation, this is a [char] for unicode keys or a [u8] for simple [ASCII](https://en.wikipedia.org/wiki/ASCII) keys,
-/// although it could be a data type of another size.  KeyCharT must implement the [Copy] trait,
-/// in other words, keys must be contiguous in memory and may not include any references.
-/// 
-/// ### DistanceT
-/// **`DistanceT`** is a generic type that represents a scalar distance in the [Metric Space](https://en.wikipedia.org/wiki/Metric_space) that contains
-/// all keys in the [Table](crate::Table).  While it is often desireable to use fractional types to express more
-/// precision than integers, the use of floating point types is discouraged on account of their
-/// inability to be reliably compared, so a fixed-point alternative type is superior.
-/// 
-/// ### ValueT
-/// **`ValueT`** is a generic type that represents a payload value associated with a record.  ValueT must
-/// be able to be serialized and deserialized from the database but otherwise is not constrained.
-/// 
-/// ### UTF8_KEYS
-/// **`UTF8_KEYS`** is a `const bool` that specifies whether the keys are [UTF-8](https://en.wikipedia.org/wiki/UTF-8) encoded [Unicode](https://en.wikipedia.org/wiki/Unicode) strings or not. 
-/// 
-/// If `UTF8_KEYS = true`, common key characters will be encoded to consume only 8 bits, (as opposed to 24 bit
-/// unicode [char]s, which are often padded to 32 bits), thus improving database size and
-/// performance, but there is additional runtime overhead to encode and decode this format.  `UTF8_KEYS = true` is only allowed if `KeyCharT = char`.
-/// 
-/// If `UTF8_KEYS = false`, all keys are stored as vectors of [KeyCharT](#keychart), meaning there is no cost to encoding
-/// and decoding them, but the database performance may suffer.
-/// 
-/// In general, if your keys are unicode strings, `UTF8_KEYS = true` is advised, and if they aren't, then
-/// `UTF8_KEYS = false` is probably required.
-/// 
-/// ## Distance Function
-/// 
-/// A distance function is any function that returns a scalar distance between two keys.  The smaller the
-/// distance, the closer the match.  Two identical keys must have a distance of [zero](num_traits::Zero).  The `fuzzy` methods
-/// in this crate, such as [lookup_fuzzy](crate::Table::lookup_fuzzy), invoke the distance function to determine
-/// if two keys adequately match.
-/// 
-/// This crate includes a simple [Levenstein Distance](https://en.wikipedia.org/wiki/Levenshtein_distance) function
-/// called [edit_distance](TableConfig::edit_distance).  However, you may often want to use a different function.
-/// 
-/// One reason to use a custom distance function is to account for expected error patterns. For example:
-/// a distance function that considers likely [OCR](https://en.wikipedia.org/wiki/Optical_character_recognition)
-/// errors might consider 'lo' to be very close to 'b', '0' to be extremely close to 'O', and 'A' to be
-/// somewhat near to '^', while '!' would be much further from '@' even though the Levenstein distances
-/// tell a different story with 'lo' being two edits away from 'b' and '!' being only one edit away from
-/// '@'.
-/// 
-/// You may want to use a custom distance function that is aware of key positions on a QWERTY keyboard, and
-/// thus able to identify likely typos.  In such a distance function, '!' and '@' are now very close
-/// because they are adjacent keys.
-/// 
-/// In another example, a distance function may be used to identify words that are similar in pronunciation,
-/// like the [Soundex](https://en.wikipedia.org/wiki/Soundex) algorithm, or you may have any number of
-/// other application-specific requirements.
-/// 
-/// Another reason for a custom distance function is if your keys are not human-readable strings, in which
-/// case you may need a different interpretation of variances between keys.  For example DNA snippets could
-/// be used as keys to search for mutations.
-/// 
-/// Distance functions must return [DistanceT](#distancet), which can be any scalar type and is not necessarily
-/// required to be an integer.  Confusingly, the [MAX_DELETES](TableConfig::MAX_DELETES) configuration
-/// parameter is an integer.  Conceptually, the SymSpell delete-distance pruning is a filter that reduces the
-/// number of candidate keys that must be tested using the distance function.  Records that can't be reached
-/// by deleting [MAX_DELETES](TableConfig::MAX_DELETES) characters from both the record key and the lookup key
-/// will never be evaluated by the distance function and are conceptually "too far away" from the lookup key.
-/// 
-/// Any distance function you choose must be compatible with SymSpell's delete-distance optimization.  In other
-/// words, you must be able to delete no more than [MAX_DELETES](TableConfig::MAX_DELETES) characters from both
-/// a given record's key and the lookup key and arrive at identical key-variants.  If your distance function
-/// is incompatible with this property then the SymSpell optimization won't work for you and you should use
-/// a different fuzzy lookup technique and a different crate.
-/// 
-/// Here is more information on the [SymSpell algorithm](https://wolfgarbe.medium.com/1000x-faster-spelling-correction-algorithm-2012-8701fcd87a5f).
-/// 
-/// Once the distance function has been evaluated, its return value is considered the authoritative distance
-/// between the two keys, and the delete distance is irrelevant from that point onwards.
+/// struct Config();
+/// impl TableConfig for Config {
+///     type KeyCharT = char;
+///     type DistanceT = u8;
+///     type ValueT = String;
+///     const UTF8_KEYS : bool = true;
+///     const MAX_DELETES : usize = 2;
+///     const MEANINGFUL_KEY_LEN : usize = 12;
+///     const GROUP_VARIANT_OVERLAP_THRESHOLD : usize = 5;
+///     const DISTANCE_FUNCTION : fn(key_a : &[Self::KeyCharT], key_b : &[Self::KeyCharT]) -> Self::DistanceT = Self::levenstein_distance;
+/// }
+/// let mut table = Table::<Config, true>::new("test.rocks", Config()).unwrap();
+/// ```
 /// 
 pub trait TableConfig {
 
     //TODO: Consider giving the associated types default values, as soon as the feature is stabilized in Rust.
     //https://github.com/rust-lang/rust/issues/29661
 
-    /// GOAT document
+    /// A generic type that specifies the unit of deletion for the SymSpell algorithm.  
+    /// Valid [Key](crate::Key) types for a [Table](crate::Table) must be losslessly convertible to and from `Vec<KeyCharT>`.
+    /// 
+    /// In a typical implementation, `KeyCharT` is a [char] for unicode keys or a [u8] for simple [ASCII](https://en.wikipedia.org/wiki/ASCII) keys,
+    /// although it could be a data type of another size.  `KeyCharT` must implement the [Copy] trait,
+    /// so that keys will be contiguous in memory and may not include any references.
     type KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::DeserializeOwned;
 
-    /// GOAT document
+    /// A generic type that represents a scalar distance in the [Metric Space](https://en.wikipedia.org/wiki/Metric_space) that contains
+    /// all keys in the [Table](crate::Table).  A `DistanceT` is the return type of the [DISTANCE_FUNCTION](TableConfig::DISTANCE_FUNCTION).
+    /// 
+    /// `DistanceT` may be any scalar type and is not necessarily required to be an integer.  It is often desireable to
+    /// use fractional types to express more precision than integers, however, the use of floating point types for
+    /// `DistanceT` is discouraged on account of rounding issues causing problems for equality comparison.  Therefore
+    /// a fixed-point alternative type is superior.
+    /// 
+    ///  Confusingly, the [MAX_DELETES](TableConfig::MAX_DELETES) const configuration parameter *is* an integer.  Conceptually,
+    /// the SymSpell delete-distance pruning is a filter that reduces the number of candidate keys that must be
+    /// tested using the [DISTANCE_FUNCTION](TableConfig::DISTANCE_FUNCTION).  Records that can't be reached
+    /// by deleting [MAX_DELETES](TableConfig::MAX_DELETES) characters from both the record key and the lookup key
+    /// will never be evaluated by the distance function and are conceptually "too far away" from the lookup key.
     type DistanceT : 'static + Copy + Zero + PartialOrd + PartialEq + From<u8>;
 
-    /// GOAT document
+    /// A generic type that represents a payload value associated with a record.  `ValueT` must
+    /// be able to be serialized and deserialized from the database but otherwise is not constrained.
     type ValueT : 'static + Serialize + serde::de::DeserializeOwned;
 
-    /// GOAT document
+    /// A `const bool` that specifies whether the keys are [UTF-8](https://en.wikipedia.org/wiki/UTF-8) encoded [Unicode](https://en.wikipedia.org/wiki/Unicode) strings or not. 
+    /// 
+    /// If `UTF8_KEYS = true`, common key characters will be encoded to consume only 8 bits, (as opposed to 24 bit
+    /// unicode [char]s, which are often padded to 32 bits), thus improving database size and
+    /// performance, but there is additional runtime overhead to encode and decode this format.  `UTF8_KEYS = true` is only allowed if `KeyCharT = char`.
+    /// 
+    /// If `UTF8_KEYS = false`, all keys are stored as vectors of [KeyCharT](TableConfig::KeyCharT), meaning there is no cost to encoding
+    /// and decoding them, but the database performance may suffer.
+    /// 
+    /// In general, if your keys are unicode strings, `UTF8_KEYS = true` is advised, and if they aren't, then
+    /// `UTF8_KEYS = false` is probably required.
     const UTF8_KEYS : bool = true;
 
     /// The number of deletes to store in the database for variants created
@@ -163,14 +129,52 @@ pub trait TableConfig {
     /// points are checked in, in the file: `misc/perf_data.txt`
     const GROUP_VARIANT_OVERLAP_THRESHOLD : usize = 5;
 
-    /// The [Distance Function](#distance-function) used by the [Table](crate::Table).  
-    const DISTANCE_FUNCTION : fn(key_a : &[Self::KeyCharT], key_b : &[Self::KeyCharT]) -> Self::DistanceT = Self::edit_distance;
+    /// The `DISTANCE_FUNCTION` can be any function that returns a scalar distance between two keys.  The smaller the
+    /// distance, the closer the match.  Two identical keys must have a distance of [zero](num_traits::Zero).  The `fuzzy` methods
+    /// in this crate, such as [lookup_fuzzy](crate::Table::lookup_fuzzy), invoke the distance function to determine
+    /// if two keys adequately match.
+    /// 
+    /// This crate includes a simple [Levenstein Distance](https://en.wikipedia.org/wiki/Levenshtein_distance) function
+    /// called [levenstein_distance](TableConfig::levenstein_distance).  However, you may often want to use a different function.
+    /// 
+    /// One reason to use a custom distance function is to account for expected error patterns. For example:
+    /// a distance function that considers likely [OCR](https://en.wikipedia.org/wiki/Optical_character_recognition)
+    /// errors might consider 'lo' to be very close to 'b', '0' to be extremely close to 'O', and 'A' to be
+    /// somewhat near to '^', while '!' would be much further from '@' even though the Levenstein distances
+    /// tell a different story with 'lo' being two edits away from 'b' and '!' being only one edit away from
+    /// '@'.
+    /// 
+    /// In another situation, you may want to use a custom distance function that is aware of key positions on a QWERTY keyboard, and
+    /// thus able to identify likely typos.  In such a distance function, '!' and '@' are now very close
+    /// because they are adjacent keys.
+    /// 
+    /// In another example, a distance function may be used to identify words that are similar in pronunciation,
+    /// like the [Soundex](https://en.wikipedia.org/wiki/Soundex) algorithm, or you may have any number of
+    /// other application-specific requirements.
+    /// 
+    /// Another reason for a custom distance function is if your keys are not human-readable strings, in which
+    /// case you may need a different interpretation of variances between keys.  For example DNA snippets could
+    /// be used as keys to search for genetic mutations.
+    /// 
+    /// Distance functions must return a [DistanceT](TableConfig::DistanceT).
+    /// 
+    /// Any distance function you choose must be compatible with SymSpell's delete-distance optimization.  In other
+    /// words, you must be able to delete no more than [MAX_DELETES](TableConfig::MAX_DELETES) characters from both
+    /// a given record's key and the lookup key and arrive at identical key-variants.  If your distance function
+    /// is incompatible with this property then the SymSpell optimization won't work for you and you should use
+    /// a different fuzzy lookup technique and a different crate.
+    /// 
+    /// Here is more information on the [SymSpell algorithm](https://wolfgarbe.medium.com/1000x-faster-spelling-correction-algorithm-2012-8701fcd87a5f).
+    /// 
+    /// Once the distance function has been evaluated, its return value is considered the authoritative distance
+    /// between the two keys, and the delete distance is irrelevant from that point onwards.
+    const DISTANCE_FUNCTION : fn(key_a : &[Self::KeyCharT], key_b : &[Self::KeyCharT]) -> Self::DistanceT = Self::levenstein_distance;
 
-    /// An implementation of the basic [Levenstein Distance](https://en.wikipedia.org/wiki/Levenshtein_distance) function, which is used by the [DEFAULT_UTF8_TABLE],
+    /// An implementation of the basic [Levenstein Distance](https://en.wikipedia.org/wiki/Levenshtein_distance) function, which is used by the [DefaultTableConfig],
     /// and may be used anywhere a distance function is required.
     /// 
     /// This implementation uses the Wagner-Fischer Algorithm, as it's described [here](https://en.wikipedia.org/wiki/Wagner%E2%80%93Fischer_algorithm)
-    fn edit_distance(key_a : &[Self::KeyCharT], key_b : &[Self::KeyCharT]) -> Self::DistanceT {
+    fn levenstein_distance(key_a : &[Self::KeyCharT], key_b : &[Self::KeyCharT]) -> Self::DistanceT {
 
         let m = key_a.len()+1;
         let n = key_b.len()+1;
@@ -230,7 +234,8 @@ pub trait TableConfig {
     }
 }
 
-/// GOAT DOCUment this
+/// A struct that implements [TableConfig] with default values.  This can be passed as a convenience
+/// when a default configuration for [Table](crate::Table) is acceptable
 pub struct DefaultTableConfig();
 
 impl TableConfig for DefaultTableConfig {
@@ -241,5 +246,5 @@ impl TableConfig for DefaultTableConfig {
     const MAX_DELETES : usize = 2;
     const MEANINGFUL_KEY_LEN : usize = 12;
     const GROUP_VARIANT_OVERLAP_THRESHOLD : usize = 5;
-    const DISTANCE_FUNCTION : fn(key_a : &[Self::KeyCharT], key_b : &[Self::KeyCharT]) -> Self::DistanceT = Self::edit_distance;
+    const DISTANCE_FUNCTION : fn(key_a : &[Self::KeyCharT], key_b : &[Self::KeyCharT]) -> Self::DistanceT = Self::levenstein_distance;
 }

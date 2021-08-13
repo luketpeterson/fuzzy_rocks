@@ -20,12 +20,12 @@ use super::perf_counters::{*};
 ///
 /// IMPLEMENTATION NOTE: Currently Rust doesn't let us bound an impl by an associated constant.  In other words
 /// the bound `ConfigT : TableConfig<UTF8_KEYS = true>` won't work, and we need to reflect the UTF8_KEYS associated
-/// constant as a const generic parameter on Table.  This is tracked by https://github.com/rust-lang/rust/issues/70256
+/// constant as a const generic parameter on Table.  This is tracked by <https://github.com/rust-lang/rust/issues/70256>
 /// 
 /// When the following Rust language issues are resolved, I will remove the UTF8_KEYS generic constant from Table
-/// https://github.com/rust-lang/rust/issues/44580
-/// https://github.com/rust-lang/rust/issues/70256
-/// https://github.com/rust-lang/rust/issues/76560
+/// - <https://github.com/rust-lang/rust/issues/44580>
+/// - <https://github.com/rust-lang/rust/issues/70256>
+/// - <https://github.com/rust-lang/rust/issues/76560>
 /// 
 /// In the meantime, the UTF8_KEYS generic constant set for the table must match the value in the config parameter.
 pub struct Table<ConfigT : TableConfig, const UTF8_KEYS : bool> {

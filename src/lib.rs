@@ -72,7 +72,7 @@
 //! ### Unicode and UTF-8 Support
 //! 
 //! A [Table] may be configured to encode keys as [UTF-8](https://en.wikipedia.org/wiki/UTF-8) or not, depending on your requirements.
-//! This is configured through the [TableConfig] object's [UTF8_KEYS](TableConfig#utf8_keys) constant.
+//! This is configured through the [TableConfig] object's [UTF8_KEYS](TableConfig::UTF8_KEYS) constant.
 //! 
 //! ## Algorithm Details
 //! 
@@ -111,6 +111,14 @@
 //! variants being loaded into memory, then query performance will certainly be better using a solution
 //! built on Rust's native collections, such as this [symspell](https://crates.io/crates/symspell)
 //! crate on [crates.io](http://crates.io).
+//! 
+//! ## Database Format
+//! 
+//! GOAT
+//! 
+//! ## Future Work
+//! 
+//! GOAT
 //! 
 //! ## Misc
 //! 
@@ -161,8 +169,6 @@
 
 //GOAT, the lookup_exact_london benchmark used to be 2.3us, now it's 6.  find out what happened
 //  Check to see if reset isn't clearing all 4 tables.
-
-//GOAT Give another go to eliminating KeyUnsafe
 
 mod unicode_string_helpers;
 mod bincode_helpers;

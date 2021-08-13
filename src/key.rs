@@ -184,11 +184,12 @@ impl<'a, KeyCharT : 'static + Copy + Eq + Hash + Serialize + serde::de::Deserial
     }
 }
 
-/// Implemented by all types that can be used as keys, whether they are UTF-8 encoded
-/// strings or arrays of KeyCharT
+/// Implemented by all types that can be used as keys to access records in a [Table](crate::Table), whether they are UTF-8 encoded
+/// &[str], [String]s, or arrays of [KeyCharT](crate::TableConfig::KeyCharT)
 pub trait Key : Eq + Hash + Clone + KeyUnsafe {
     //TODO: When GenericAssociatedTypes is stabilized, I will remove the KeyUnsafe trait in favor of an associated type
-    //type BorrowedKey<'a> : Key<KeyCharT>;
+    // https://github.com/rust-lang/rust/issues/44265
+    //type BorrowedKey<'a> : Key;
 
     fn num_chars(&self) -> usize;
     fn as_bytes(&self) -> &[u8];
