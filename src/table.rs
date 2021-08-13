@@ -212,7 +212,7 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
 
             //Calculate the set of variants that is unique to the keys we'll be adding
             let mut unique_keys_variants = HashSet::new();
-            for unique_keys_variant in groups.key_group_variants[group_idx].difference(&existing_keys_variants) {
+            for unique_keys_variant in groups.key_group_variants[group_idx].difference(existing_keys_variants) {
                 unique_keys_variants.insert(unique_keys_variant.to_owned());
             }
 
@@ -286,7 +286,7 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
         for (idx, group_id) in group_ids.into_iter().enumerate() {
 
             //If we didn't remove any keys from this group, there is nothing to do here.
-            if deleted_group_keys_sets[idx].len() == 0 {
+            if deleted_group_keys_sets[idx].is_empty() {
                 remaining_group_indices.push(group_id.group_idx());
                 continue;
             }
@@ -316,7 +316,7 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
             self.db.delete_variant_references(group_id, unique_keys_variants)?;
 
             //Update or delete the group
-            if remaining_group_keys_sets[idx].len() == 0 {
+            if remaining_group_keys_sets[idx].is_empty() {
                 //Delete the group's keys record if we made the group empty
                 self.db.delete_key_group_entry(group_id)?;
             } else {
@@ -332,12 +332,12 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
     }
 
     /// Replaces all of the keys in a record with the supplied keys
-    fn replace_keys_internal<'a, K>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String>
+    fn replace_keys_internal<K>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String>
         where
         K : Key<KeyCharT = ConfigT::KeyCharT>
     {
 
-        if keys.len() < 1 {
+        if keys.is_empty() {
             return Err("record must have at least one key".to_string());
         }
         if keys.iter().any(|key| key.num_chars() > MAX_KEY_LENGTH) {
@@ -348,7 +348,7 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
         self.delete_keys_internal(record_id)?;
 
         //Set the keys on the new record
-        self.put_record_keys(record_id, keys.into_iter(), keys.len())
+        self.put_record_keys(record_id, keys.iter(), keys.len())
     }
 
     /// Replaces a record's value with the supplied value.  Returns the value that was replaced
@@ -506,17 +506,17 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
             if !visited_groups.contains(&key_group_id) {
 
                 //Check the record's keys with the distance function and find the smallest distance
-                let mut record_keys_iter = self.db.get_keys_in_group::<<Self as TableKeyEncoding>::OwnedKeyT>(key_group_id, &self.perf_counters).unwrap().into_iter();
+                let mut record_keys_iter = self.db.get_keys_in_group::<<Self as TableKeyEncoding>::OwnedKeyT>(key_group_id, &self.perf_counters).unwrap();
                 
                 let record_key = record_keys_iter.next().unwrap(); //If we have a zero-element keys array, it's a bug elsewhere, so this unwrap should always succeed
                 let record_key_chars = record_key.move_into_buf(&mut key_chars_buf);
-                let mut smallest_distance = distance_function(&record_key_chars[..], &looup_key_chars[..]);
+                let mut smallest_distance = distance_function(&record_key_chars[..], looup_key_chars);
                 #[cfg(feature = "perf_counters")]
                 { self.perf_counters.update(|fields| fields.distance_function_invocation_count += 1); }
 
                 for record_key in record_keys_iter {
                     let record_key_chars = record_key.move_into_buf(&mut key_chars_buf);
-                    let distance = distance_function(&record_key_chars, &looup_key_chars[..]);
+                    let distance = distance_function(record_key_chars, looup_key_chars);
                     if distance < smallest_distance {
                         smallest_distance = distance;
                     }
@@ -557,7 +557,7 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
         //First, we should check to see if lookup_exact gives us what we want.  Because if it does,
         // it's muuuuuuch faster.  If we have an exact result, no other key will be a better match
         let mut results_vec = self.lookup_exact_internal(key)?;
-        if results_vec.len() > 0 {
+        if !results_vec.is_empty() {
             return Ok(results_vec.into_iter());
         }
         
@@ -574,8 +574,7 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
                 } else if result.1 < best_distance {
                     //We've found a shorter distance, so drop the results_vec and start a new one
                     best_distance = result.1;
-                    results_vec = vec![];
-                    results_vec.push(result.0);
+                    results_vec = vec![result.0];
                 }
             }
 
@@ -627,7 +626,7 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
             record_ids = if meaningful_noop {
 
                 //If the meaningful_key exactly equals our key, we can just return the variant's results
-                bincode_vec_iter::<KeyGroupID>(&variant_vec_bytes).map(|key_group_id_bytes| {
+                bincode_vec_iter::<KeyGroupID>(variant_vec_bytes).map(|key_group_id_bytes| {
                     KeyGroupID::from(usize::from_le_bytes(key_group_id_bytes.try_into().unwrap()))
                 }).map(|key_group_id| key_group_id.record_id()).collect()
 
@@ -636,7 +635,7 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
                 //But if they are different, we need to Iterate every KeyGroupID in the variant in order
                 //  to check if we really have a match on the whole key
                 let owned_lookup_key = <Self as TableKeyEncoding>::OwnedKeyT::from_key(lookup_key);
-                bincode_vec_iter::<KeyGroupID>(&variant_vec_bytes)
+                bincode_vec_iter::<KeyGroupID>(variant_vec_bytes)
                 .filter_map(|key_group_id_bytes| {
                     let key_group_id = KeyGroupID::from(usize::from_le_bytes(key_group_id_bytes.try_into().unwrap()));
                     
@@ -676,7 +675,7 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
     }
 
     /// Returns all of the keys for a record, across all key groups
-    fn get_keys_internal<'a>(&'a self, record_id : RecordID) -> Result<impl Iterator<Item=<Self as TableKeyEncoding>::OwnedKeyT> + 'a, String> {
+    fn get_keys_internal(&self, record_id : RecordID) -> Result<impl Iterator<Item=<Self as TableKeyEncoding>::OwnedKeyT> + '_, String> {
 
         let key_groups_iter = self.db.get_record_key_groups(record_id)?;
         let result_iter = key_groups_iter.flat_map(move |key_group| self.db.get_keys_in_group::<<Self as TableKeyEncoding>::OwnedKeyT>(key_group, &self.perf_counters).unwrap());
@@ -708,7 +707,7 @@ impl <ConfigT : TableConfig<KeyCharT = char>>Table<ConfigT, true> {
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn insert<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = char>>(&mut self, key : K, value : &ConfigT::ValueT) -> Result<RecordID, String> {
-        self.insert_internal([&key.into_key()].iter().map(|key| *key), 1, value)
+        self.insert_internal([&key.into_key()].iter().copied(), 1, value)
     }
 
     /// Retrieves a key-value pair using a RecordID
@@ -737,8 +736,8 @@ impl <ConfigT : TableConfig<KeyCharT = char>>Table<ConfigT, true> {
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn create<'a, K : Key<KeyCharT = char>>(&mut self, keys : &'a [K], value : &ConfigT::ValueT) -> Result<RecordID, String> {
-        self.insert_internal(keys.into_iter(), keys.len(), value)
+    pub fn create<K : Key<KeyCharT = char>>(&mut self, keys : &[K], value : &ConfigT::ValueT) -> Result<RecordID, String> {
+        self.insert_internal(keys.iter(), keys.len(), value)
     }
 
     /// Adds the supplied keys to the record's keys
@@ -747,8 +746,8 @@ impl <ConfigT : TableConfig<KeyCharT = char>>Table<ConfigT, true> {
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn add_keys<'a, K : Key<KeyCharT = char>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
-        self.add_keys_internal(record_id, keys.into_iter(), keys.len())
+    pub fn add_keys<K : Key<KeyCharT = char>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
+        self.add_keys_internal(record_id, keys.iter(), keys.len())
     }
 
     /// Removes the supplied keys from the keys associated with a record
@@ -762,7 +761,7 @@ impl <ConfigT : TableConfig<KeyCharT = char>>Table<ConfigT, true> {
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn remove_keys<K : Key<KeyCharT = char>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
-        let keys_set : HashSet<&K> = HashSet::from_iter(keys.into_iter());
+        let keys_set : HashSet<&K> = HashSet::from_iter(keys.iter());
         self.remove_keys_internal(record_id, &keys_set)
     }
 
@@ -772,7 +771,7 @@ impl <ConfigT : TableConfig<KeyCharT = char>>Table<ConfigT, true> {
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn replace_keys<'a, K : Key<KeyCharT = char>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
+    pub fn replace_keys<K : Key<KeyCharT = char>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
         self.replace_keys_internal(record_id, keys)
     }
 
@@ -780,7 +779,7 @@ impl <ConfigT : TableConfig<KeyCharT = char>>Table<ConfigT, true> {
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn get_keys<'a>(&'a self, record_id : RecordID) -> Result<impl Iterator<Item=String> + 'a, String> {
+    pub fn get_keys(&self, record_id : RecordID) -> Result<impl Iterator<Item=String> + '_, String> {
         self.get_keys_internal(record_id)
     }
 
@@ -863,7 +862,7 @@ impl <ConfigT : TableConfig>Table<ConfigT, false> {
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn insert<K : IntoKey<Key = KeyT>, KeyT : Key<KeyCharT = ConfigT::KeyCharT>>(&mut self, key : K, value : &ConfigT::ValueT) -> Result<RecordID, String> {
-        self.insert_internal([&key.into_key()].iter().map(|key| *key), 1, value)
+        self.insert_internal([&key.into_key()].iter().copied(), 1, value)
     }
 
     /// Retrieves a key-value pair using a RecordID
@@ -892,10 +891,8 @@ impl <ConfigT : TableConfig>Table<ConfigT, false> {
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn create<'a, K : Key<KeyCharT = ConfigT::KeyCharT>>(&mut self, keys : &'a [K], value : &ConfigT::ValueT) -> Result<RecordID, String> {
-        let num_keys = keys.len();
-        let keys_iter = keys.into_iter();
-        self.insert_internal(keys_iter, num_keys, value)
+    pub fn create<K : Key<KeyCharT = ConfigT::KeyCharT>>(&mut self, keys : &[K], value : &ConfigT::ValueT) -> Result<RecordID, String> {
+        self.insert_internal(keys.iter(), keys.len(), value)
     }
 
     /// Adds the supplied keys to the record's keys
@@ -904,8 +901,8 @@ impl <ConfigT : TableConfig>Table<ConfigT, false> {
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn add_keys<'a, K : Key<KeyCharT = ConfigT::KeyCharT>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
-        self.add_keys_internal(record_id, keys.into_iter(), keys.len())
+    pub fn add_keys<K : Key<KeyCharT = ConfigT::KeyCharT>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
+        self.add_keys_internal(record_id, keys.iter(), keys.len())
     }
 
     /// Removes the supplied keys from the keys associated with a record
@@ -919,7 +916,7 @@ impl <ConfigT : TableConfig>Table<ConfigT, false> {
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn remove_keys<K : Key<KeyCharT = ConfigT::KeyCharT>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
-        let keys_set : HashSet<&K> = HashSet::from_iter(keys.into_iter());
+        let keys_set : HashSet<&K> = HashSet::from_iter(keys.iter());
         self.remove_keys_internal(record_id, &keys_set)
     }
 
@@ -929,7 +926,7 @@ impl <ConfigT : TableConfig>Table<ConfigT, false> {
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn replace_keys<'a, K : Key<KeyCharT = ConfigT::KeyCharT>>(&mut self, record_id : RecordID, keys : &'a [K]) -> Result<(), String> {
+    pub fn replace_keys<K : Key<KeyCharT = ConfigT::KeyCharT>>(&mut self, record_id : RecordID, keys : &[K]) -> Result<(), String> {
         self.replace_keys_internal(record_id, keys)
     }
 
@@ -937,7 +934,7 @@ impl <ConfigT : TableConfig>Table<ConfigT, false> {
     /// 
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
-    pub fn get_keys<'a>(&'a self, record_id : RecordID) -> Result<impl Iterator<Item=Vec<ConfigT::KeyCharT>> + 'a, String> {
+    pub fn get_keys(&self, record_id : RecordID) -> Result<impl Iterator<Item=Vec<ConfigT::KeyCharT>> + '_, String> {
         self.get_keys_internal(record_id)
     }
 

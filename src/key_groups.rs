@@ -39,7 +39,7 @@ impl KeyGroupID {
     pub fn group_idx(&self) -> usize {
         self.0 >> 44
     }
-    pub fn to_le_bytes(&self) -> [u8; 8] {
+    pub fn to_le_bytes(self) -> [u8; 8] {
         self.0.to_le_bytes()
     }
 }
@@ -138,7 +138,7 @@ impl <OwnedKeyT, const UTF8_KEYS : bool>KeyGroups<OwnedKeyT, UTF8_KEYS> {
 
             } else {
                 group_idx = 0;
-                create_new_group = self.key_group_keys.len() == 0;
+                create_new_group = self.key_group_keys.is_empty();
             }
         }
 

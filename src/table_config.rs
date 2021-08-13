@@ -35,7 +35,7 @@ pub const MAX_KEY_LENGTH : usize = 95;
 ///     const MAX_DELETES : usize = 2;
 ///     const MEANINGFUL_KEY_LEN : usize = 12;
 ///     const GROUP_VARIANT_OVERLAP_THRESHOLD : usize = 5;
-///     const DISTANCE_FUNCTION : fn(key_a : &[Self::KeyCharT], key_b : &[Self::KeyCharT]) -> Self::DistanceT = Self::levenstein_distance;
+///     const DISTANCE_FUNCTION : DistanceFunction<Self::KeyCharT, Self::DistanceT> = Self::levenstein_distance;
 /// }
 /// let mut table = Table::<Config, true>::new("test.rocks", Config()).unwrap();
 /// ```
@@ -144,6 +144,7 @@ pub trait TableConfig {
 
         //Allocate a 2-dimensional vec for the distances between the first i characters of key_a
         //and the first j characters of key_b
+        #[allow(clippy::uninit_assumed_init)]
         let mut d : [[u8; MAX_KEY_LENGTH + 1]; MAX_KEY_LENGTH + 1] = unsafe { MaybeUninit::uninit().assume_init() };
 
         //NOTE: I personally find this (below) more readable, but clippy really like the other style.  -\_(..)_/-
@@ -197,7 +198,7 @@ pub trait TableConfig {
     }
 }
 
-/// A function type for a function to compute the distance between two keys. 
+/// A type for a function to compute the distance between two keys. Used in a [TableConfig]
 /// 
 /// A `DistanceFunction` can be any function that returns a scalar distance when given two keys.  The smaller the
 /// distance, the closer the match.  Two identical keys must have a distance of [zero](num_traits::Zero).  The `fuzzy` methods
@@ -252,5 +253,5 @@ impl TableConfig for DefaultTableConfig {
     const MAX_DELETES : usize = 2;
     const MEANINGFUL_KEY_LEN : usize = 12;
     const GROUP_VARIANT_OVERLAP_THRESHOLD : usize = 5;
-    const DISTANCE_FUNCTION : fn(key_a : &[Self::KeyCharT], key_b : &[Self::KeyCharT]) -> Self::DistanceT = Self::levenstein_distance;
+    const DISTANCE_FUNCTION : DistanceFunction<Self::KeyCharT, Self::DistanceT> = Self::levenstein_distance;
 }
