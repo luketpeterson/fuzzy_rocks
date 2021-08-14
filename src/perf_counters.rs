@@ -11,16 +11,24 @@
 #[cfg(feature = "perf_counters")]
 use core::cell::Cell;
 
-#[cfg(feature = "perf_counters")]
+/// All of the performance counters to measure and tune the behavior of the system
+/// 
+/// NOTE: In order to get valid data, you must enable the `perf_counters` feature in the `Cargo.toml` file
+/// with an entry similar to this:
+/// 
+/// ```toml
+/// [dependencies]
+/// fuzzy_rocks = { version = "0.2.0", features = ["perf_counters"] }
+/// ```
 #[derive(Debug, Copy, Clone)]
 pub struct PerfCounterFields {
 
-    /// The number of times we query the DB for a variant during a fuzzy lookup
+    /// The number of times the DB was queried for a variant during a fuzzy lookup
     /// 
     /// This is based on the number of variants created from the query keys
     pub variant_lookup_count : usize,
 
-    /// The number of times we sucessfully load a variant entry from the DB during a fuzzy lookup
+    /// The number of times a variant entry was sucessfully loaded from the DB during a fuzzy lookup
     /// 
     /// This is based on how much overlap there is between the variants in the database and the variants
     /// generated from the keys
@@ -38,34 +46,33 @@ pub struct PerfCounterFields {
     /// entries loaded during all lookups
     pub max_variant_entry_refs : usize,
 
-    /// The number of time we load a key_group from the DB
+    /// The number of time a key_group was loaded from the DB
     /// 
     /// Many key group references will be common across many variants, so this number reflects the number
-    /// of unique key groups we load from the DB.
+    /// of unique key groups loaded from the DB.
     pub key_group_load_count : usize,
 
-    /// The number of keys we find across all key groups that we loaded during fuzzy lookups
+    /// The number of keys found across all key groups loaded during fuzzy lookups
     pub keys_found_count : usize,
 
     /// The number of times the distance function is invoked to compare two keys during fuzzy lookups
     /// 
     /// The current implementation tests all keys in a key group, so this value will exactly match
-    /// [keys_found_count].  In the future, this will be optimized.
+    /// [keys_found_count](Self::keys_found_count).  In the future, this will be optimized.
     pub distance_function_invocation_count : usize,
 
-    /// The number of unique records that we found with fuzzy lookups
+    /// The number of unique records that were found with fuzzy lookups
     /// 
     /// This counter include doesn't include records that were rejected because of a distance threshold,
-    /// but does include records that didn't qualify as the "best" distance in [lookup_best].
+    /// but does include records that didn't qualify as the "best" distance in [lookup_best](crate::Table::lookup_best).
     /// 
-    /// The number of keys found per record can be calculated by: [keys_found_count] / [records_found_count].
+    /// The number of keys found per record can be calculated by: [keys_found_count](Self::keys_found_count) / [records_found_count](Self::records_found_count).
     /// Ideally we would only find one key for the record we are looking for although we must test all found
-    /// keys to find the shortest distance.  Adjusting the [group_variant_overlap_threshold] is one way to
+    /// keys to find the shortest distance.  Adjusting the [group_variant_overlap_threshold](crate::TableConfig::GROUP_VARIANT_OVERLAP_THRESHOLD) is one way to
     /// lower this ratio, although it may hurt performance in other ways.
     pub records_found_count : usize,
 }
 
-#[cfg(feature = "perf_counters")]
 impl PerfCounterFields {
     pub fn new() -> Self {
         Self {
@@ -112,6 +119,11 @@ pub struct PerfCounters();
 impl PerfCounters {
     pub fn new() -> Self {
         Self()
+    }
+    pub fn reset(&self) {
+    }
+    pub fn get(&self) -> PerfCounterFields {
+        PerfCounterFields::new()
     }
 }
 

@@ -683,12 +683,14 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
         Ok(result_iter)
     }
 
-    #[cfg(feature = "perf_counters")]
+    /// Resets all values in the performance counters, so the information returned by [get_perf_counters](Table::get_perf_counters) only
+    /// reflects activity since the last call to `reset_perf_counters`
     pub fn reset_perf_counters(&self) {
         self.perf_counters.reset();
     }
 
-    #[cfg(feature = "perf_counters")]
+    /// Returns the values in the performance counters, which should reflect all activity since the previous call
+    /// to [reset_perf_counters](Table::reset_perf_counters)
     pub fn get_perf_counters(&self) -> PerfCounterFields {
         self.perf_counters.get()
     }

@@ -81,7 +81,7 @@
 //! The fuzzy_rocks implementation has a few additional details to be aware of:
 //! 
 //! - fuzzy_rocks won't find keys that don't have at least one character in common, regardless of the value
-//! of `config.max_deletes`.  For example the key `me` won't be found by the query string `hi`, even with a distance
+//! of [MAX_DELETES](TableConfig::MAX_DELETES).  For example the key `me` won't be found by the query string `hi`, even with a distance
 //! of 2 (or any other value).  This decision was made because the variant space becomes very crowded
 //! for short keys, and the extreme example of the empty-string variant was severely damaging performance with
 //! short keys.
@@ -90,27 +90,54 @@
 //! 
 //! This crate is designed for large databases where startup time and resident memory footprint are significant
 //! considerations.  This create has been tested with 200,000 records cumulatively having over 1 million keys,
-//! and about 140 million key variants.  In this situation, a fuzzy lookup was about 500 microseconds running
-//! on my laptop - which is very expensive in absolute terms.
+//! and about 140 million key variants.  In this situation, a fuzzy lookup was between 500us (microseconds)
+//! and 1ms, running on my laptop - which I consider to be very expensive in absolute terms, but acceptable
+//! for many use cases.
 //! 
 //! The performance will also vary greatly depending on the key distribution and the table parameters.  Keys
 //! that are distinct from eachother will lead to faster searches vs. keys that share many variants in common.
 //! 
 //! ### Tuning for Performance
 //! 
-//! GOATGOATGOAT, Write-up on perf_counters, how to enable, etc.
+//! Performance is highly dependent on the values for the [TableConfig] used when creating the [Table], but
+//! the values must match the characteristics of the keys in the data set.
 //! 
-//! GOATGOATGOAT, Write-up on benchmarks.  How to edit, how to run.
+//! Briefly, the tuning parameters are:
 //! 
-//! A smaller `config.max_deletes` value will perform better but be able to find fewer results for a search.
+//! [MAX_DELETES](TableConfig::MAX_DELETES): A smaller `MAX_DELETES` value will perform exponentially better but be able to find
+//! fewer results for a search.  `MAX_DELETES` should be tuned to be as small as you can make it, but no smaller. ;-)
 //! 
-//! A higher value for `config.meaningful_key_len` will result in fewer wasted evaluations of the distance function
-//! but will lead to more entries in the variants database and thus more memory pressure.
+//! [MEANINGFUL_KEY_LEN](TableConfig::MEANINGFUL_KEY_LEN): A higher value for `MEANINGFUL_KEY_LEN` will result in fewer wasted evaluations of the distance function
+//! but will lead to more entries in the variants database and thus reduced database performance.
+//! 
+//! [GROUP_VARIANT_OVERLAP_THRESHOLD](TableConfig::GROUP_VARIANT_OVERLAP_THRESHOLD) controls the logic about when
+//! a key is merged with an existing `key_group` vs. when a new `key_group` is created.
+//! 
+//! More detailed information on these tuning parameters can be found in the docs for [TableConfig].
 //! 
 //! If your use-case can cope with a higher startup latency and you are ok with all of your keys and
 //! variants being loaded into memory, then query performance will certainly be better using a solution
 //! built on Rust's native collections, such as this [symspell](https://crates.io/crates/symspell)
 //! crate on [crates.io](http://crates.io).
+//! 
+//! ### Performance Counters
+//! 
+//! You can use the [PerfCounterFields] to measure the number of internal operations being performed, and use
+//! that information to adjust the [TableConfig] parameters.
+//! 
+//! First, you must enable the `perf_counters`
+//! feature in the `Cargo.toml` file, with an entry similar to this:
+//! 
+//! ```toml
+//! [dependencies]
+//! fuzzy_rocks = { version = "0.2.0", features = ["perf_counters"] }
+//! ```
+//! 
+//! Then, the performance counters may be reset by calling [Table::reset_perf_counters] and read by calling [Table::get_perf_counters].
+//! 
+//! ### Benchmarks
+//! 
+//! GOATGOATGOAT, Write-up on benchmarks.  How to edit, how to run.
 //! 
 //! ## Database Format
 //! 
@@ -288,6 +315,7 @@ mod sym_spell;
 mod perf_counters;
 mod table;
 pub use table::{Table};
+pub use perf_counters::{PerfCounterFields};
 
 
 #[cfg(test)]

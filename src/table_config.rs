@@ -124,6 +124,14 @@ pub trait TableConfig {
     /// order for the key to be added to the key group rather than being placed into a new separate key
     /// group.
     /// 
+    /// Setting this number to 0 puts every key for a record together in a group, while a large number
+    /// results in each key being assigned to its own group.
+    /// 
+    /// Creating excess groups when for keys that will likely be fetched together anyway leads to unnecessay
+    /// database fetches and bloats the variant entries with additional `KeyGroupID`s.  On the other hand,
+    /// combining distant keys into together in a key_group leads to unnecessary invocations of the
+    /// [DistanceFunction].
+    /// 
     /// NOTE: We arrived at the default value (5) empirically by testing a number of different values and
     /// observing the effects on lookup speed, DB construction speed, and DB size.  The observed data
     /// points are checked in, in the file: `misc/perf_data.txt`

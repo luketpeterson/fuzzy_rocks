@@ -107,8 +107,9 @@ impl <OwnedKeyT, const UTF8_KEYS : bool>KeyGroups<OwnedKeyT, UTF8_KEYS> {
             // We'll need to figure out which existing key_group is the best place for this key
             // Or if we'll create a new key_group instead
 
-            //If ConfigT::GROUP_VARIANT_OVERLAP_THRESHOLD == 0, then we always create a new key_group,
-            //so checking the existing key_groups is a waste of time
+            //If ConfigT::GROUP_VARIANT_OVERLAP_THRESHOLD == 0, then we always add the key to group 0,
+            //which is the record's only group.  So checking the overlap with existing groups is a
+            //waste of time
             if ConfigT::GROUP_VARIANT_OVERLAP_THRESHOLD > 0 {
 
                 //Count the number of overlapping variants the key has with each existing group
