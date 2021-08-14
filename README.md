@@ -23,7 +23,7 @@ more than one record in the Table.
 ## Usage Examples
 
 A simple use case with a default [Table] configuration using `&str`s as keys.
-```
+```rust
 use fuzzy_rocks::{*};
 
 //Create and reset the FuzzyRocks Table
@@ -56,7 +56,7 @@ assert_eq!(table.get_value(wed).unwrap(), "Suiyoubi");
 
 Another use case with a [Table] that stores (simplified) DNA sequences.
 For a more comprehensive representation of the format for biological molecules, look at the [FASTA format](https://en.wikipedia.org/wiki/FASTA_format).
-```
+```rust
 use fuzzy_rocks::{*};
 
 //A simplified data type that might represent a Nucleobase.

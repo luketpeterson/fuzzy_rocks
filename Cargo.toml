@@ -2,7 +2,7 @@ cargo-features = ["edition2021"]
 
 [package]
 name = "fuzzy_rocks"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["Luke Peterson <luke@infoplatter.com>"]
 edition = "2021"
 license = "MIT OR Apache-2.0"
