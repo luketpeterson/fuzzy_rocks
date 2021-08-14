@@ -383,9 +383,6 @@ mod tests {
         // Alternate geonames file
         // NOTE: Uncomment this to use a different file
         // let geonames_file_path = PathBuf::from("/path/to/file/cities500.txt");
-//GOATGOATGOAT
-//let geonames_file_path = PathBuf::from("/Users/admin/Downloads/Geonames.org/cities500.txt");
-
     
         //Create the FuzzyRocks Table with an appropriate config
         struct Config();
@@ -816,6 +813,3 @@ mod tests {
     }
 
 }
-
-//GOAT Let Wolf Garbe know about my crate when I publish FuzzyRocks v0.2
-
