@@ -9,6 +9,9 @@ The reasons to use this crate over another SymSpell implementation are:
 - Startup time matters (You can't recompute key variants at load time)
 - You have millions of keys and care about memory footprint
 
+**NOTE** This README is the front page of the crate docs, but many links are broken
+unless viewed in context.  You can access the complete docs for the latest release [HERE](https://docs.rs/fuzzy_rocks)
+
 ## Records & Keys
 
 A [Table] contains records, each of which has a unique [RecordID], and each record is associated
