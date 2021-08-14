@@ -137,7 +137,12 @@
 //! 
 //! ### Benchmarks
 //! 
-//! GOATGOATGOAT, Write-up on benchmarks.  How to edit, how to run.
+//! Fuzzy_rocks contains a (small but growing) suite of benchmarks, implemented with [criterion](https://docs.rs/criterion).
+//! These can be invoked with:
+//! 
+//! ```sh
+//! cargo bench -- --nocapture
+//! ```
 //! 
 //! ## Database Format
 //! 
