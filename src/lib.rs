@@ -14,7 +14,7 @@
 //! 
 //! A [Table] contains records, each of which has a unique [RecordID], and each record is associated
 //! with one or more [Key]s.  Keys are used to perform fuzzy lookups of records.  A [Key] is typically
-//! a [String] or an [&str], but may be any number of collections of [KeyCharT](TableConfig#keychart), such
+//! a [String] or an [&str], but may be any number of collections of [KeyCharT](TableConfig::KeyCharT), such
 //! as a [Vec], [Array](array), or [Slice](slice).
 //! 
 //! Keys are not required to be unique in the Table and multiple records may have keys in common.  All
