@@ -21,8 +21,9 @@
 //! of the lookup methods may return multiple records if the lookup key and other criteria matches
 //! more than one record in the Table.
 //! 
-//! ## Usage Example
+//! ## Usage Examples
 //! 
+//! A simple use case with a default [Table] configuration using `&str`s as keys.
 //! ```
 //! use fuzzy_rocks::{*};
 //! 
@@ -53,6 +54,38 @@
 //! assert_eq!(table.get_one_key(wed).unwrap(), "Wednesday");
 //! assert_eq!(table.get_value(wed).unwrap(), "Suiyoubi");
 //! ```
+//! 
+//! Another use case with a [Table] that stores (simplified) DNA sequences.
+//! For a more comprehensive representation of the format for biological molecules, look at the [FASTA format](https://en.wikipedia.org/wiki/FASTA_format).
+//! ```
+//! use fuzzy_rocks::{*};
+//! 
+//! //A simplified data type that might represent a Nucleobase.
+//! // https://en.wikipedia.org/wiki/Nucleobase
+//! #[derive(Copy, Clone, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+//! enum Nucleobase {
+//!     A, // adenine
+//!     C, // cytosine
+//!     G, // guanine
+//!     T, // thymine
+//!     U, // uracil
+//! }
+//! 
+//! struct Config();
+//! impl TableConfig for Config {
+//!     type KeyCharT = Nucleobase;
+//!     type DistanceT = u8;
+//!     type ValueT = usize;
+//!     const UTF8_KEYS : bool = false;
+//!     const MAX_DELETES : usize = 2;
+//!     const MEANINGFUL_KEY_LEN : usize = 24;
+//!     const GROUP_VARIANT_OVERLAP_THRESHOLD : usize = 5;
+//!     const DISTANCE_FUNCTION : DistanceFunction<Self::KeyCharT, Self::DistanceT> = Self::levenstein_distance;
+//! }
+//! 
+//! //Create and reset the FuzzyRocks Table
+//! let mut table = Table::<Config, false>::new("test.rocks", Config()).unwrap();
+//! ``` 
 //! 
 //! Additional usage examples can be found in the tests, located at the bottom of the [src/lib.rs](https://github.com/luketpeterson/fuzzy_rocks/blob/main/src/lib.rs) file.
 //! 
@@ -302,9 +335,6 @@
 //! download.  The content of `geonames_megacities.txt` was derived from data on [geonames.org](http://geonames.org),
 //! and licensed under a [Creative Commons Attribution 4.0 License](https://creativecommons.org/licenses/by/4.0/legalcode)
 //! 
-
-//GOATGOATGOAT, write up:
-// 0.) DNA snippet example.  Look at FAStA Wikipedia article
 
 mod unicode_string_helpers;
 mod bincode_helpers;
@@ -786,8 +816,6 @@ mod tests {
     }
 
 }
-
-//GOATGOATGOAT, Clippy, and update documentation, and run rustfmt
 
 //GOAT Let Wolf Garbe know about my crate when I publish FuzzyRocks v0.2
 
