@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 description = "A persistent datastore backed by RocksDB with fuzzy key lookup using an arbitrary distance function accelerated by the SymSpell algorithm"
 repository = "https://github.com/luketpeterson/fuzzy_rocks/"
 readme = "README.md"
-keywords = ["rocksdb", "fuzzy search", "symspell"]
+keywords = ["rocksdb", "fuzzy", "search", "fuzzy-search", "symspell"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
