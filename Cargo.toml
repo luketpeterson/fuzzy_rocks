@@ -1,5 +1,3 @@
-cargo-features = ["edition2021"]
-
 [package]
 name = "fuzzy_rocks"
 version = "0.2.1"

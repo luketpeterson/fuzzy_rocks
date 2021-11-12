@@ -37,7 +37,7 @@ pub const MAX_KEY_LENGTH : usize = 95;
 ///     const GROUP_VARIANT_OVERLAP_THRESHOLD : usize = 5;
 ///     const DISTANCE_FUNCTION : DistanceFunction<Self::KeyCharT, Self::DistanceT> = Self::levenstein_distance;
 /// }
-/// let mut table = Table::<Config, true>::new("test.rocks", Config()).unwrap();
+/// let mut table = Table::<Config, true>::new("config_example.rocks", Config()).unwrap();
 /// ```
 /// 
 pub trait TableConfig {

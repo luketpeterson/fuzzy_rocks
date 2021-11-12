@@ -28,7 +28,7 @@
 //! use fuzzy_rocks::{*};
 //! 
 //! //Create and reset the FuzzyRocks Table
-//! let mut table = Table::<DefaultTableConfig, true>::new("test.rocks", DefaultTableConfig()).unwrap();
+//! let mut table = Table::<DefaultTableConfig, true>::new("simple_example.rocks", DefaultTableConfig()).unwrap();
 //! table.reset().unwrap();
 //!
 //! //Insert some records
@@ -84,7 +84,7 @@
 //! }
 //! 
 //! //Create and reset the FuzzyRocks Table
-//! let mut table = Table::<Config, false>::new("test.rocks", Config()).unwrap();
+//! let mut table = Table::<Config, false>::new("dna_example.rocks", Config()).unwrap();
 //! ``` 
 //! 
 //! Additional usage examples can be found in the tests, located at the bottom of the [src/lib.rs](https://github.com/luketpeterson/fuzzy_rocks/blob/main/src/lib.rs) file.
@@ -497,7 +497,7 @@ mod tests {
             type ValueT = String;
             const MEANINGFUL_KEY_LEN : usize = 8;
         }
-        let mut table = Table::<Config, true>::new("test.rocks", Config()).unwrap();
+        let mut table = Table::<Config, true>::new("basic_test.rocks", Config()).unwrap();
 
         //Clear out any records that happen to be hanging out from a previous run
         table.reset().unwrap();
@@ -721,7 +721,7 @@ mod tests {
             const MEANINGFUL_KEY_LEN : usize = 8;
             const UTF8_KEYS : bool = false;
         }
-        let mut table = Table::<Config, false>::new("test2.rocks", Config()).unwrap();
+        let mut table = Table::<Config, false>::new("non_unicode_test.rocks", Config()).unwrap();
 
         //Clear out any records that happen to be hanging out from a previous run
         table.reset().unwrap();
