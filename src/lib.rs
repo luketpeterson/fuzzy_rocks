@@ -336,7 +336,7 @@
 //! and licensed under a [Creative Commons Attribution 4.0 License](https://creativecommons.org/licenses/by/4.0/legalcode)
 //! 
 
-mod unicode_string_helpers;
+pub mod unicode_string_helpers;
 mod bincode_helpers;
 mod database;
 mod key;
@@ -462,7 +462,8 @@ mod tests {
             }
         }
 
-        //Indirectly that the number of records roughly matches the number of entries from the CSV
+        //Indirectly validate that the number of records roughly matches the number of entries
+        // from the TSV file
         //NOTE: RocksDB doesn't have a "record_count" feature, and therefore neither does our Table,
         //but since we started from a reset table, we can ensure that the last assigned record_id
         //should roughly correspond to the number of entries we inserted

@@ -352,7 +352,7 @@ impl Drop for DBConnection {
 }
 
 // The function to add a new entry for a variant in the database, formulated as a RocksDB callback
-fn variant_append_merge(_key: &[u8], existing_val: Option<&[u8]>, operands: &mut MergeOperands) -> Option<Vec<u8>> {
+fn variant_append_merge(_key: &[u8], existing_val: Option<&[u8]>, operands: &MergeOperands) -> Option<Vec<u8>> {
 
     // Note: I've seen this function be called at odd times by RocksDB, such as when a DB is
     // opened.  I haven't been able to get a straight answer on why RocksDB calls this function
@@ -363,6 +363,8 @@ fn variant_append_merge(_key: &[u8], existing_val: Option<&[u8]>, operands: &mut
     // println!("Append-Called {:?}", std::str::from_utf8(key).unwrap());
     let vec_coder = bincode::DefaultOptions::new().with_fixint_encoding().with_little_endian();
 
+    let operands_iter = operands.into_iter();
+
     //Deserialize the existing database entry into a vec of KeyGroupIDs
     //NOTE: we're actually using a HashSet because we don't want any duplicates
     let mut variant_vec = if let Some(existing_bytes) = existing_val {
@@ -371,11 +373,11 @@ fn variant_append_merge(_key: &[u8], existing_val: Option<&[u8]>, operands: &mut
     } else {
         //TODO: Remove status println!()
         // println!("MERGE WITH NONE!!");
-        HashSet::with_capacity(operands.size_hint().0)
+        HashSet::with_capacity(operands_iter.size_hint().0)
     };
 
     //Add the new KeyGroupID(s)
-    for op in operands {
+    for op in operands_iter {
         //Deserialize the vec on the operand, and merge its entries into the existing vec
         let operand_vec : HashSet<KeyGroupID> = vec_coder.deserialize(op).unwrap();
         variant_vec.extend(operand_vec);
