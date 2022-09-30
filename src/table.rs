@@ -3,6 +3,7 @@
 //! 
 
 use std::collections::{HashMap, HashSet};
+use std::collections::hash_map::Entry;
 
 use num_traits::Zero;
 use serde::{Serialize};
@@ -525,14 +526,25 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
                     { self.perf_counters.update(|fields| fields.distance_function_invocation_count += 1); }    
                 }
 
-                match threshold {
-                    Some(threshold) => {
-                        if smallest_distance <= threshold{
-                            result_map.insert(key_group_id.record_id(), smallest_distance);
-                        }       
+                let insert_distance = match threshold {
+                    Some(threshold) if smallest_distance <= threshold => {
+                        Some(smallest_distance)
                     }
-                    None => {
-                        result_map.insert(key_group_id.record_id(), smallest_distance);
+                    None => Some(smallest_distance),
+                    _ => None
+                };
+
+                if let Some(smallest_distance) = insert_distance {
+                    match result_map.entry(key_group_id.record_id()) {
+                        Entry::Occupied(mut entry) => {
+                            let current_distance = *entry.get();
+                            if smallest_distance < current_distance {
+                                entry.insert(smallest_distance);
+                            }
+                        }
+                        Entry::Vacant(entry) => {
+                            entry.insert(smallest_distance);
+                        }
                     }
                 }
 
