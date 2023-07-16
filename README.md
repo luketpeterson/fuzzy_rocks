@@ -330,6 +330,10 @@ DB contents are encoded using the [bincode] crate.  Currently the database conta
 ### 0.1.1
 - Initial Release
 
+## Acknowledgements
+
+- [@Linus789](https://github.com/Linus789) found and fixed a logic bug in for v.0.2.2
+
 ## Misc
 
 **NOTE**: The included `geonames_megacities.txt` file is a stub for the `geonames_test`, designed to stress-test

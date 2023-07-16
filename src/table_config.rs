@@ -153,23 +153,24 @@ pub trait TableConfig {
         //Allocate a 2-dimensional vec for the distances between the first i characters of key_a
         //and the first j characters of key_b
         #[allow(clippy::uninit_assumed_init)]
-        let mut d : [[u8; MAX_KEY_LENGTH + 1]; MAX_KEY_LENGTH + 1] = unsafe { MaybeUninit::uninit().assume_init() };
+        let mut d : [[MaybeUninit<u8>; MAX_KEY_LENGTH + 1]; MAX_KEY_LENGTH + 1] = [[MaybeUninit::uninit(); MAX_KEY_LENGTH + 1]; MAX_KEY_LENGTH + 1];
 
         //NOTE: I personally find this (below) more readable, but clippy really like the other style.  -\_(..)_/-
         // for i in 1..m {
         //     d[i][0] = i;
         // }
         for (i, row) in d.iter_mut().enumerate().skip(1) {
-            //row[0] = i as u8;
-            let element = unsafe{ row.get_unchecked_mut(0) };
-            *element = i as u8;
+            unsafe{ *(row[0].as_mut_ptr()) = i as u8; }
+            // let element = unsafe{ row.get_unchecked_mut(0) };
+            // *element = i as u8;
+            //GOAT
         }
 
         // for j in 1..n {
         //     d[0][j] = j as u8;
         // }
         for (j, element) in d[0].iter_mut().enumerate() {
-            *element = j as u8;
+            unsafe{ *element.as_mut_ptr() = j as u8; }
         }
 
         for j in 1..n {
@@ -188,21 +189,21 @@ pub trait TableConfig {
                 };
 
                 //let deletion_distance = d[i-1][j] + 1;
-                let deletion_distance = unsafe {d.get_unchecked(i-1).get_unchecked(j)} + 1;
+                let deletion_distance = unsafe {d.get_unchecked(i-1).get_unchecked(j).assume_init()} + 1;
                 //let insertion_distance = d[i][j-1] + 1;
-                let insertion_distance = unsafe {d.get_unchecked(i).get_unchecked(j-1)} + 1;
+                let insertion_distance = unsafe {d.get_unchecked(i).get_unchecked(j-1).assume_init()} + 1;
                 //let substitution_distance = d[i-1][j-1] + substitution_cost;
-                let substitution_distance = unsafe {d.get_unchecked(i-1).get_unchecked(j-1)} + substitution_cost;
+                let substitution_distance = unsafe {d.get_unchecked(i-1).get_unchecked(j-1).assume_init()} + substitution_cost;
 
                 let smallest_distance = min(min(deletion_distance, insertion_distance), substitution_distance);
                 
                 //d[i][j] = smallest_distance;  
                 let element = unsafe{ d.get_unchecked_mut(i).get_unchecked_mut(j) };
-                *element = smallest_distance;
+                unsafe{ *element.as_mut_ptr() = smallest_distance; }
             }
         }
 
-        Self::DistanceT::from(d[m-1][n-1])
+        Self::DistanceT::from(unsafe{ d[m-1][n-1].assume_init() })
     }
 }
 
