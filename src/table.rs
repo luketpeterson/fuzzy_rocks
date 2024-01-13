@@ -16,6 +16,7 @@ use super::sym_spell::{*};
 use super::key_groups::{*};
 use super::bincode_helpers::{*};
 use super::perf_counters::{*};
+use crate::Coder;
 
 /// A collection containing records that may be searched using [Key]s
 ///
@@ -31,7 +32,7 @@ use super::perf_counters::{*};
 /// In the meantime, the UTF8_KEYS generic constant set for the table must match the value in the config parameter.
 pub struct Table<ConfigT : TableConfig, const UTF8_KEYS : bool> {
     record_count : usize,
-    db : DBConnection,
+    db : DBConnection<ConfigT::CoderT>,
     config : ConfigT,
     deleted_records : Vec<RecordID>, //NOTE: Currently we don't try to hold onto deleted records across unloads, but we may change this in the future.
     perf_counters : PerfCounters,
@@ -79,7 +80,7 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
         }
 
         //Open the Database
-        let db = DBConnection::new(path)?;
+        let db = DBConnection::new(ConfigT::CoderT::new(), path)?;
 
         //Find the next value for new RecordIDs, by probing the entries in the "rec_data" column family
         let record_count = db.record_count()?;
@@ -152,13 +153,13 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
     }
 
     /// Divides the keys up into key groups and assigns them to a record.
-    /// 
+    ///
     /// Should NEVER be called on a record that already has keys or orphaned database entries will result
     fn put_record_keys<'a, K, KeysIterT : Iterator<Item=&'a K>>(&mut self, record_id : RecordID, keys_iter : KeysIterT, num_keys : usize) -> Result<(), String>
         where
         K : Key<KeyCharT = ConfigT::KeyCharT> + 'a
     {
-    
+
         //Make groups for the keys
         let groups = KeyGroups::<<Self as TableKeyEncoding>::OwnedKeyT, UTF8_KEYS>::make_groups_from_keys(keys_iter, num_keys, &self.config).unwrap();
         let num_groups = groups.key_group_keys.len();
@@ -168,7 +169,7 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
             let key_group_id = KeyGroupID::from_record_and_idx(record_id, idx); 
             self.db.put_variant_references(key_group_id, variant_set)?;
         }
-        
+
         //Put the keys for each group into the table
         for (idx, key_set) in groups.key_group_keys.into_iter().enumerate() {
             let key_group_id = KeyGroupID::from_record_and_idx(record_id, idx); 
@@ -369,7 +370,7 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
 
     /// Inserts a record into the Table, called by insert(), which is implemented differently depending
     /// on the UTF8_KEYS constant
-    /// 
+    ///
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     fn insert_internal<'a, K, KeysIterT : Iterator<Item=&'a K>>(&mut self, keys_iter : KeysIterT, num_keys : usize, value : &ConfigT::ValueT) -> Result<RecordID, String>

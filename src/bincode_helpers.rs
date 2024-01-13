@@ -1,14 +1,14 @@
 
 use core::marker::PhantomData;
-use std::convert::{TryInto};
+use std::convert::TryInto;
 
 /// This Iterator object is designed to iterate over the entries in a bincode-encoded Vec<T>
 /// without needing to actually deserialize the Vec into a temporary memory object
-/// 
+///
 /// **NOTE** This type assumes bincode is configured with [FixintEncoding](bincode::config::FixintEncoding),
 /// i.e. 64-bit usize types and [LittleEndian](bincode::config::LittleEndian) byte order.  Any other
 /// configuration and your data may be corrupt.
-/// 
+///
 /// TODO: Try using `with_varint_encoding` rather than `with_fixint_encoding`, and measure performance.
 /// It's highly likely that the data size reduction completely makes up for the extra work and memcpy incurred
 /// deserializing the structure, and it's faster not to mess with trying to read the buffer without fully
@@ -47,7 +47,7 @@ impl <'a, T : Sized + Copy>Iterator for BinCodeVecIterator<'a, T> {
 
     fn next(&mut self) -> Option<&'a [u8]> {
         let t_size_bytes = ::std::mem::size_of::<T>();
-        
+
         if self.remaining_buf.len() >= t_size_bytes {
             let (t_chars, remainder) = self.remaining_buf.split_at(t_size_bytes);
             self.remaining_buf = remainder;
@@ -61,7 +61,7 @@ impl <'a, T : Sized + Copy>Iterator for BinCodeVecIterator<'a, T> {
 /// Interprets the bytes at the start of `buf` as an encoded 64-bit unsigned number that has been
 /// encoded with bincode, using [VarintEncoding](bincode::config::VarintEncoding) and
 /// [LittleEndian](bincode::config::LittleEndian) byte order.
-/// 
+///
 /// Returns the encoded value, and sets `num_bytes` to the number of bytes in the buffer used to encode
 /// the value.
 pub fn bincode_u64_le_varint(buf : &[u8], num_bytes : &mut usize) -> u64 {

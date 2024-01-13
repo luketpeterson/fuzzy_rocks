@@ -1,18 +1,16 @@
 //!
 //! The Database module contains wrappers around the database (RocksDB) connection, and the
 //! functions for getting and setting records in the DB.  Nothing should be re-exported.
-//! 
+//!
 
 use core::hash::Hash;
 
-use std::collections::{HashSet};
-
-use serde::{Serialize};
-use bincode::Options;
+use std::collections::HashSet;
+use serde::Serialize;
 
 use rocksdb::{DB, DBWithThreadMode, ColumnFamily, ColumnFamilyDescriptor, MergeOperands};
 
-use super::bincode_helpers::{*};
+use super::encode_decode::Coder;
 
 use super::records::{*};
 use super::key_groups::{*};
@@ -25,14 +23,15 @@ pub const VALUES_CF_NAME : &str = "values";
 pub const VARIANTS_CF_NAME : &str = "variants";
 
 /// Encapsulates a connection to a database
-pub struct DBConnection {
+pub struct DBConnection<C: Coder + Send + Sync> {
     db : DBWithThreadMode<rocksdb::SingleThreaded>,
     path : String,
+    coder: C,
 }
 
-impl DBConnection {
+impl<C: Coder> DBConnection<C> {
 
-    pub fn new(path : &str) -> Result<Self, String> {
+    pub fn new(coder: C, path : &str) -> Result<Self, String> {
 
         //Configure the "keys" and "values" column families
         let keys_cf = ColumnFamilyDescriptor::new(KEYS_CF_NAME, rocksdb::Options::default());
@@ -42,7 +41,11 @@ impl DBConnection {
         //Configure the "variants" column family
         let mut variants_opts = rocksdb::Options::default();
         variants_opts.create_if_missing(true);
-        variants_opts.set_merge_operator_associative("append to RecordID vec", variant_append_merge);
+        let coder_clone = coder.clone();
+        variants_opts.set_merge_operator_associative("append to RecordID vec",
+            move |key: &[u8], existing_val: Option<&[u8]>, operands: &MergeOperands| -> Option<Vec<u8>> {
+                variant_append_merge(&coder_clone, key, existing_val, operands)
+        });
         let variants_cf = ColumnFamilyDescriptor::new(VARIANTS_CF_NAME, variants_opts);
 
         //Configure the database itself
@@ -56,6 +59,7 @@ impl DBConnection {
         Ok(Self{
             db,
             path : path.to_string(),
+            coder
         })
     }
 
@@ -72,11 +76,15 @@ impl DBConnection {
         self.db.create_cf(KEYS_CF_NAME, &rocksdb::Options::default())?;
         self.db.create_cf(RECORD_DATA_CF_NAME, &rocksdb::Options::default())?;
         self.db.create_cf(VALUES_CF_NAME, &rocksdb::Options::default())?;
-        
+
         //Recreate the "variants" column family
         let mut variants_opts = rocksdb::Options::default();
         variants_opts.create_if_missing(true);
-        variants_opts.set_merge_operator_associative("append to RecordID vec", variant_append_merge);
+        let coder_clone = self.coder.clone();
+        variants_opts.set_merge_operator_associative("append to RecordID vec",
+            move |key: &[u8], existing_val: Option<&[u8]>, operands: &MergeOperands| -> Option<Vec<u8>> {
+                variant_append_merge(&coder_clone, key, existing_val, operands)
+        });
         self.db.create_cf(VARIANTS_CF_NAME, &variants_opts)?;
 
         Ok(())
@@ -84,7 +92,7 @@ impl DBConnection {
 
     ///Returns the number of record entries in the database, by probing the entries in the
     /// "rec_data" column family
-    /// 
+    ///
     ///NOTE: this is not a simple lookup, and is designed to be called when loading a new table, not
     /// as a simple accessor
     pub fn record_count(&self) -> Result<usize, String> {
@@ -94,15 +102,14 @@ impl DBConnection {
     }
 
     /// Returns an iterator for every key group associated with a specified record
-    /// 
+    ///
     /// Internal FuzzyRocks interface, but exported outside the key_groups module
     #[inline(always)]
     pub fn get_record_key_groups(&self, record_id : RecordID) -> Result<impl Iterator<Item=KeyGroupID>, String> {
 
         let rec_data_cf_handle = self.db.cf_handle(RECORD_DATA_CF_NAME).unwrap();
         if let Some(rec_data_vec_bytes) = self.db.get_pinned_cf(rec_data_cf_handle, record_id.to_le_bytes())? {
-            let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
-            let rec_data : RecordData = record_coder.deserialize(&rec_data_vec_bytes).unwrap();
+            let rec_data : RecordData = self.coder.decode_varint_owned_from_bytes(&rec_data_vec_bytes).unwrap();
 
             if !rec_data.key_groups.is_empty() {
                 Ok(rec_data.key_groups.into_iter().map(move |group_idx| KeyGroupID::from_record_and_idx(record_id, group_idx)))
@@ -121,9 +128,8 @@ impl DBConnection {
 
         //Create the RecordData, serialize it, and put in into the rec_data table.
         let rec_data_cf_handle = self.db.cf_handle(RECORD_DATA_CF_NAME).unwrap();
-        let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
         let new_rec_data = RecordData::new(key_groups_vec);
-        let rec_data_bytes = record_coder.serialize(&new_rec_data).unwrap();
+        let rec_data_bytes = self.coder.encode_varint_to_buf(&new_rec_data).unwrap();
         self.db.put_cf(rec_data_cf_handle, record_id.to_le_bytes(), rec_data_bytes)?;
 
         Ok(())
@@ -137,8 +143,7 @@ impl DBConnection {
         //Get the keys vec by deserializing the bytes from the db
         let keys_cf_handle = self.db.cf_handle(KEYS_CF_NAME).unwrap();
         if let Some(keys_vec_bytes) = self.db.get_pinned_cf(keys_cf_handle, key_group.to_le_bytes())? {
-            let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
-            let keys_vec : Vec<OwnedKeyT> = record_coder.deserialize(&keys_vec_bytes).unwrap();
+            let keys_vec : Vec<OwnedKeyT> = self.coder.decode_varint_owned_from_bytes(&keys_vec_bytes).unwrap();
 
             #[cfg(feature = "perf_counters")]
             {
@@ -159,8 +164,8 @@ impl DBConnection {
     }
 
     /// Returns the number of keys in a key group, without returning the keys themselves
-    /// 
-    /// This is intended to be faster than get_keys_in_group, but it's unclear if it actually
+    ///
+    /// NOTE: This is intended to be faster than get_keys_in_group, but it's unclear if it actually
     /// saves much as RocksDB still loads the whole entry from the DB, even though the count is
     /// stored in the first few bytes.
     #[inline(always)]
@@ -168,25 +173,19 @@ impl DBConnection {
 
         let keys_cf_handle = self.db.cf_handle(KEYS_CF_NAME).unwrap();
         if let Some(keys_vec_bytes) = self.db.get_pinned_cf(keys_cf_handle, key_group.to_le_bytes())? {
-
-            //The vector element count should be the first encoded usize
-            let mut skip_bytes = 0;
-            let keys_count = bincode_u64_le_varint(&keys_vec_bytes, &mut skip_bytes);
-
-            Ok(keys_count as usize)
+            Ok(self.coder.varint_list_len(&keys_vec_bytes).unwrap())
         } else {
             panic!(); //If we hit this, we have a corrupt DB
         }
     }
 
     /// Creates entries in the keys table.  If we are updating an old record, we will overwrite it.
-    /// 
+    ///
     /// NOTE: This function will NOT update any variants used to locate the key
     pub fn put_key_group_entry<K : Eq + Hash + Serialize>(&mut self, key_group_id : KeyGroupID, raw_keys : &HashSet<K>) -> Result<(), String> {
-        
+
         //Serialize the keys into a vec of bytes
-        let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
-        let keys_bytes = record_coder.serialize(&raw_keys).unwrap();
+        let keys_bytes = self.coder.encode_varint_list_to_buf(&raw_keys).unwrap();
 
         //Put the vector of keys into the keys table
         let keys_cf_handle = self.db.cf_handle(KEYS_CF_NAME).unwrap();
@@ -198,7 +197,7 @@ impl DBConnection {
     /// Deletes a key group entry from the db.  Does not clean up variants that may reference
     /// the key group, so must be called as part of another operation
     pub fn delete_key_group_entry(&mut self, key_group : KeyGroupID) -> Result<(), String> {
-        
+
         let keys_cf_handle = self.db.cf_handle(KEYS_CF_NAME).unwrap();
         self.db.delete_cf(keys_cf_handle, key_group.to_le_bytes())?;
 
@@ -212,8 +211,7 @@ impl DBConnection {
         //Get the value object by deserializing the bytes from the db
         let values_cf_handle = self.db.cf_handle(VALUES_CF_NAME).unwrap();
         if let Some(value_bytes) = self.db.get_pinned_cf(values_cf_handle, record_id.to_le_bytes())? {
-            let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
-            let value : ValueT = record_coder.deserialize(&value_bytes).unwrap();
+            let value : ValueT = self.coder.decode_varint_owned_from_bytes(&value_bytes).unwrap();
 
             Ok(value)
         } else {
@@ -238,18 +236,17 @@ impl DBConnection {
     /// 
     /// NOTE: This function will NOT update any variants used to locate the key
     pub fn put_value<ValueT : 'static + Serialize + serde::de::DeserializeOwned>(&mut self, record_id : RecordID, value : &ValueT) -> Result<(), String> {
-        
+
         //Serialize the value and put it in the values table.
         let value_cf_handle = self.db.cf_handle(VALUES_CF_NAME).unwrap();
-        let record_coder = bincode::DefaultOptions::new().with_varint_encoding().with_little_endian();
-        let value_bytes = record_coder.serialize(value).unwrap();
+        let value_bytes = self.coder.encode_varint_to_buf(value).unwrap();
         self.db.put_cf(value_cf_handle, record_id.to_le_bytes(), value_bytes)?;
 
         Ok(())
     }
 
     /// Executes a provided closure for every variant entry that exists from the provided set
-    /// 
+    ///
     /// NOTE: The closure gets the raw entry bytes, rather than the parsed KeyGroupIDs
     /// because sometimes we don't want to parse the whole entry.  Also it takes a set of variants
     /// so we don't need to create the CFHandle every time as we would with a simple "get_variant"
@@ -282,12 +279,12 @@ impl DBConnection {
 
         Ok(())
     }
-    
+
     /// Deletes references to a specified key group from a number of specified variant entries.
-    /// 
+    ///
     /// If the variant references no key groups after deletion then the variant entry is deleted
     pub fn delete_variant_references(&mut self, key_group : KeyGroupID, variants : HashSet<Vec<u8>>) -> Result<(), String> {
-        
+
         //Loop over each variant, and remove the KeyGroupID from its associated variant entry in
         // the database, and remove the variant entry if it only referenced the key_group we're removing
         let variants_cf_handle = self.db.cf_handle(VARIANTS_CF_NAME).unwrap();
@@ -295,19 +292,19 @@ impl DBConnection {
 
             if let Some(variant_entry_bytes) = self.db.get_pinned_cf(variants_cf_handle, variant)? {
 
-                let variant_entry_len = bincode_vec_fixint_len(&variant_entry_bytes);
+                let variant_entry_len = self.coder.fixint_list_len(&variant_entry_bytes).unwrap();
 
                 //If the variant entry references more than one record, rebuild it with our records absent
                 if variant_entry_len > 1 {
                     let mut new_vec : Vec<KeyGroupID> = Vec::with_capacity(variant_entry_len-1);
-                    for key_group_id_bytes in bincode_vec_iter::<KeyGroupID>(&variant_entry_bytes) {
+                    for key_group_id_bytes in self.coder.fixint_list_iter::<KeyGroupID>(&variant_entry_bytes).unwrap() {
                         let other_key_group_id = KeyGroupID::from(usize::from_le_bytes(key_group_id_bytes.try_into().unwrap()));
                         if other_key_group_id != key_group {
                             new_vec.push(other_key_group_id);
                         }
                     }
-                    let vec_coder = bincode::DefaultOptions::new().with_fixint_encoding().with_little_endian();
-                    self.db.put_cf(variants_cf_handle, variant, vec_coder.serialize(&new_vec).unwrap())?;
+
+                    self.db.put_cf(variants_cf_handle, variant, self.coder.encode_fixint_list_to_buf(&new_vec).unwrap())?;
                 } else {
                     //Otherwise, remove the variant entry entirely
                     self.db.delete_cf(variants_cf_handle, variant)?;
@@ -322,13 +319,9 @@ impl DBConnection {
     pub fn put_variant_references(&mut self, key_group : KeyGroupID, variants : HashSet<Vec<u8>>) -> Result<(), String> {
 
         // Creates a Vec<KeyGroupID> with one entry, serialized out as a string of bytes
-        fn new_variant_vec(key_group : KeyGroupID) -> Vec<u8> {
-
-            //Create a new vec and Serialize it out
-            let new_vec = vec![key_group];
-            let vec_coder = bincode::DefaultOptions::new().with_fixint_encoding().with_little_endian();
-            vec_coder.serialize(&new_vec).unwrap()
-        }
+        let new_variant_vec = |key_group : KeyGroupID| -> Vec<u8> {
+            self.coder.encode_fixint_list_to_buf(&vec![key_group]).unwrap()
+        };
 
         //Add the key_group to each variant
         let variants_cf_handle = self.db.cf_handle(VARIANTS_CF_NAME).unwrap();
@@ -343,7 +336,7 @@ impl DBConnection {
 
 }
 
-impl Drop for DBConnection {
+impl<C: Coder + Send + Sync> Drop for DBConnection<C> {
     fn drop(&mut self) {
         //Close down Rocks
         self.db.flush().unwrap();
@@ -352,7 +345,7 @@ impl Drop for DBConnection {
 }
 
 // The function to add a new entry for a variant in the database, formulated as a RocksDB callback
-fn variant_append_merge(_key: &[u8], existing_val: Option<&[u8]>, operands: &MergeOperands) -> Option<Vec<u8>> {
+fn variant_append_merge<C: Coder>(coder: &C, _key: &[u8], existing_val: Option<&[u8]>, operands: &MergeOperands) -> Option<Vec<u8>> {
 
     // Note: I've seen this function be called at odd times by RocksDB, such as when a DB is
     // opened.  I haven't been able to get a straight answer on why RocksDB calls this function
@@ -360,15 +353,14 @@ fn variant_append_merge(_key: &[u8], existing_val: Option<&[u8]>, operands: &Mer
 
     //TODO: Status prints in this function to understand the behavior of RocksDB.
     // Remove them when this is understood.
-    // println!("Append-Called {:?}", std::str::from_utf8(key).unwrap());
-    let vec_coder = bincode::DefaultOptions::new().with_fixint_encoding().with_little_endian();
+    // println!("Append-Called {:?}", std::str::from_utf8(_key).unwrap());
 
     let operands_iter = operands.into_iter();
 
     //Deserialize the existing database entry into a vec of KeyGroupIDs
     //NOTE: we're actually using a HashSet because we don't want any duplicates
     let mut variant_vec = if let Some(existing_bytes) = existing_val {
-        let new_vec : HashSet<KeyGroupID> = vec_coder.deserialize(existing_bytes).unwrap();
+        let new_vec : HashSet<KeyGroupID> = coder.decode_fixint_owned_from_bytes(existing_bytes).unwrap();
         new_vec
     } else {
         //TODO: Remove status println!()
@@ -379,7 +371,7 @@ fn variant_append_merge(_key: &[u8], existing_val: Option<&[u8]>, operands: &Mer
     //Add the new KeyGroupID(s)
     for op in operands_iter {
         //Deserialize the vec on the operand, and merge its entries into the existing vec
-        let operand_vec : HashSet<KeyGroupID> = vec_coder.deserialize(op).unwrap();
+        let operand_vec : HashSet<KeyGroupID> = coder.decode_fixint_owned_from_bytes(op).unwrap();
         variant_vec.extend(operand_vec);
     }
 
@@ -387,8 +379,7 @@ fn variant_append_merge(_key: &[u8], existing_val: Option<&[u8]>, operands: &Mer
     // println!("AppendResults {:?}", variant_vec);
 
     //Serialize the vec back out again
-    let result = vec_coder.serialize(&variant_vec).unwrap();
-    Some(result)
+    coder.encode_fixint_to_buf(&variant_vec).ok()
 }
 
 // Returns the usize that is one larger than the largest key, assuming the column family contains a
@@ -411,7 +402,7 @@ fn probe_for_max_sequential_key(db : &DBWithThreadMode<rocksdb::SingleThreaded>,
     } else {
         starting_hint * starting_hint
     };
-    
+
     let mut cur_val = starting_hint;
     loop {
 

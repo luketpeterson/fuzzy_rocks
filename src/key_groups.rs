@@ -1,9 +1,9 @@
 //!
 //! The KeyGroups module contains all of the logic for working with key groups.  Nothing
 //! from here should be re-exported
-//! 
+//!
 
-use core::cmp::{Ordering};
+use core::cmp::Ordering;
 
 use std::collections::{HashMap, HashSet};
 use serde::{Serialize, Deserialize};
@@ -14,6 +14,7 @@ use super::records::{*};
 use super::sym_spell::{*};
 use super::table_config::{*};
 use super::perf_counters::{*};
+use crate::Coder;
 
 /// A unique identifier for a key group, which includes its RecordID
 /// 
@@ -193,12 +194,13 @@ impl <OwnedKeyT, const UTF8_KEYS : bool>KeyGroups<OwnedKeyT, UTF8_KEYS> {
     }
 
     /// Loads the existing key groups for a record in the [Table]
-    /// 
+    ///
     /// This function is used when adding new keys to a record, and figuring out which groups to
     /// merge the keys into
-    pub fn load_key_groups<KeyCharT : Clone, ConfigT : TableConfig>(db : &DBConnection, record_id : RecordID, config : &ConfigT, perf_counters : &PerfCounters) -> Result<Self, String> 
+    pub fn load_key_groups<KeyCharT : Clone, ConfigT : TableConfig, C>(db : &DBConnection<C>, record_id : RecordID, config : &ConfigT, perf_counters : &PerfCounters) -> Result<Self, String> 
         where
         OwnedKeyT : OwnedKey<KeyCharT = KeyCharT>,
+        C: Coder + Send + Sync + 'static,
     {
 
         let mut groups = KeyGroups::new();
