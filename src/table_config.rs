@@ -73,7 +73,8 @@ pub trait TableConfig {
     /// be able to be serialized and deserialized from the database but otherwise is not constrained.
     type ValueT : 'static + Serialize + serde::de::DeserializeOwned;
 
-    //TODO document this
+    /// The [Coder] interface to use to encode and decode the objects in the database.  Currently this should be either [BincodeCoder](crate::BincodeCoder)
+    /// or [MsgPackCoder](crate::MsgPackCoder).  Alternatively, use [DefaultCoder](crate::DefaultCoder) for the coder selected by the crate features
     type CoderT : 'static + crate::Coder + Send + Sync;
 
     /// A `const bool` that specifies whether the keys are [UTF-8](https://en.wikipedia.org/wiki/UTF-8) encoded [Unicode](https://en.wikipedia.org/wiki/Unicode) strings or not. 

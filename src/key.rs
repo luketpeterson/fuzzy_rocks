@@ -3,13 +3,13 @@
 //! helper traits associated with it. Only the [Key] trait should be publicly re-exported.
 //! 
 
-use std::{slice};
+use std::slice;
 use core::hash::Hash;
 use std::mem::{forget, size_of, transmute};
 
-use serde::{Serialize};
+use serde::Serialize;
 
-use super::unicode_string_helpers::{*};
+use super::unicode_string_helpers::*;
 
 /// A private trait representing the subset of key types that are owned and therefore 'static
 pub trait OwnedKey : 'static + Sized + Serialize + serde::de::DeserializeOwned + Key {
