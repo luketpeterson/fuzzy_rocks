@@ -29,7 +29,7 @@ name = "lookups"
 harness = false
 
 [features]
-default = ["messagepack", "bincode"]
+default = ["msgpack", "bincode"]
 perf_counters = []
-messagepack = ["dep:rmp-serde"]
+msgpack = ["dep:rmp-serde"]
 bincode = ["dep:bincode"]

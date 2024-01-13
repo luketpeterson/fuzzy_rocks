@@ -5,7 +5,7 @@
 /// Wraps an interface to an encode / decode format
 ///
 /// NOTE: It's unlikely you will want to implement this trait.  Instead use one of the existing
-/// implementations: [BincodeCoder] and [MessagePackCoder]
+/// implementations: [BincodeCoder](crate::BincodeCoder) and [MsgPackCoder](crate::MsgPackCoder)
 pub trait Coder: Clone + Send + Sync + 'static {
     type FixintListIter<'a, I: Copy + Sized + 'static>: Iterator<Item=&'a [u8]>;
 
@@ -20,14 +20,14 @@ pub trait Coder: Clone + Send + Sync + 'static {
 
     /// Encodes a list of items to a buffer using a variable integer size encoding
     ///
-    /// NOTE: it is OK to decode the returned buffer using [decode_owned_from_bytes]
+    /// NOTE: it is OK to decode the returned buffer using [decode_varint_owned_from_bytes](Self::decode_varint_owned_from_bytes)
     /// WARNING: This method requires the Serializer for T to encode the length as the first thing in
     /// the serialized output
     fn encode_varint_list_to_buf<T: serde::ser::Serialize + IntoIterator>(&self, list: &T) -> Result<Vec<u8>, String>;
 
     /// Returns the number of elements in an encoded varint list without decoding them
     ///
-    /// WARNING: This method assumes the bytes were encoded with [encode_varint_list_to_buf]
+    /// WARNING: This method assumes the bytes were encoded with [encode_varint_list_to_buf](Self::encode_varint_list_to_buf)
     fn varint_list_len(&self, bytes: &[u8]) -> Result<usize, String>;
 
     /// Encodes an arbitrary structure to bytes using a fixed integer size encoding
@@ -38,18 +38,20 @@ pub trait Coder: Clone + Send + Sync + 'static {
 
     /// Encodes a list of items to a buffer using a fixed integer size encoding
     ///
-    /// WARNING: a list can't be encoded with this method and then decoded using [decode_owned_from_bytes]
-    /// because the encoding format may be different.  Also, list elements **MUST** be a fixed size when encoded
+    /// WARNING: a list can't be encoded with this method and then decoded using [decode_varint_owned_from_bytes](Self::decode_varint_owned_from_bytes)
+    /// because the encoding format may be different, but it's ok to use [decode_fixint_owned_from_bytes](Self::decode_fixint_owned_from_bytes)
+    ///
+    /// WARNING: List elements **MUST** be a fixed size when encoded
     fn encode_fixint_list_to_buf<T: serde::ser::Serialize + IntoIterator<Item=I>, I: Sized + Copy>(&self, list: &T) -> Result<Vec<u8>, String>;
 
     /// Returns the number of elements in an encoded fixint list without decoding them
     ///
-    /// WARNING: This method assumes the bytes were encoded with [encode_fixint_list_to_buf]
+    /// WARNING: This method assumes the bytes were encoded with [encode_fixint_list_to_buf](Self::encode_fixint_list_to_buf)
     fn fixint_list_len(&self, bytes: &[u8]) -> Result<usize, String>;
 
     /// Returns an iterator over the sub-slices within `bytes` that correspond to each item in the list
     ///
-    /// WARNING: This method assumes the bytes were encoded with [encode_fixint_list_to_buf]
+    /// WARNING: This method assumes the bytes were encoded with [encode_fixint_list_to_buf](Self::encode_fixint_list_to_buf)
     fn fixint_list_iter<'a, I: Copy + Sized + 'static>(&self, bytes: &'a [u8]) -> Result<Self::FixintListIter<'a, I>, String>;
 
 }

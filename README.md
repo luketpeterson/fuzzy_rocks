@@ -78,6 +78,7 @@ impl TableConfig for Config {
     type KeyCharT = Nucleobase;
     type DistanceT = u8;
     type ValueT = usize;
+    type CoderT = BincodeCoder;
     const UTF8_KEYS : bool = false;
     const MAX_DELETES : usize = 2;
     const MEANINGFUL_KEY_LEN : usize = 24;
@@ -87,7 +88,7 @@ impl TableConfig for Config {
 
 //Create and reset the FuzzyRocks Table
 let mut table = Table::<Config, false>::new("test.rocks", Config()).unwrap();
-``` 
+```
 
 Additional usage examples can be found in the tests, located at the bottom of the [src/lib.rs](https://github.com/luketpeterson/fuzzy_rocks/blob/main/src/lib.rs) file.
 
@@ -202,75 +203,42 @@ DB contents are encoded using the [bincode] crate.  Currently the database conta
 
 ## Future Work
 
-1. Optimization for crowded neighborhoods in the key metric-space.  The current design optimizes for the case
-    where a single record has multiple keys with overlapping variants.  This is an efficient design in the
-    case where many proximate keys belong to the same record, as is the case when multiple spelling variations
-    for the same word are submitted to the Table.
+1. Optimization for crowded neighborhoods in the key metric-space.  The current design optimizes for the case where a single record has multiple keys with overlapping variants.  This is an efficient design in the case where many proximate keys belong to the same record, as is the case when multiple spelling variations for the same word are submitted to the Table.
 
     First, here is some background on how we got to this design.  In v0.2.0, multi-key
-    support was added because many use cases involved creating multiple records that were conceptually the same
-    record in order to represent key variations such as multiple valid spellings of the same thing. Becauase
-    these keys are often similar to each other and shared many variants in the database, the key_groups feature
-    was added to improve performance by reducing the number of keys in each variant entry.  Ideally
-    a given variant entry would only contain one reference to a record even if that record had many similar keys.
+    support was added because many use cases involved creating multiple records that were conceptually the same record in order to represent key variations such as multiple valid spellings of the same thing. Becauase these keys are often similar to each other and shared many variants in the database, the key_groups feature
+    was added to improve performance by reducing the number of keys in each variant entry.  Ideally a given variant entry would only contain one reference to a record even if that record had many similar keys.
 
-    Unfortunately this meant all the record's keys would be loaded together and that lead to unnecessary
-    invocations of the distance function to evaluate all of the keys for each record.  The solution in v0.2.0
-    was to segment a record's keys into key_groups, so similar keys would be together in the same key group
-    but other keys needn't be tested.  This solution works well for individual records with many keys that
-    cluster together.
+    Unfortunately this meant all the record's keys would be loaded together and that lead to unnecessary invocations of the distance function to evaluate all of the keys for each record.  The solution in v0.2.0 was to segment a record's keys into key_groups, so similar keys would be together in the same key group but other keys needn't be tested.  This solution works well for individual records with many keys that cluster together.
 
-    However, a large performance problem still exists when many keys from *Different* records cluster together.
-    To address this, I think that a different database layout is needed, and here is my thinking:
+    However, a large performance problem still exists when many keys from *Different* records cluster together. To address this, I think that a different database layout is needed, and here is my thinking:
 
-    - Create a separate CF to store full keys is needed, and each key entry would contain the [RecordID]s
-        assiciated with that key. There are two possible implementations:
+    - Create a separate CF to store full keys is needed, and each key entry would contain the [RecordID]s assiciated with that key. There are two possible implementations:
 
-        - A more compact implementation for longer keys would be to have a "KeyID" to reference each key entry.
-            Then the entry would contain the key itself, and the [RecordID]s associated with the key in the same
-            entry or in another CF that is also indexed by `KeyID`.  In this implementation, the variant CF is
-            still used to find the KeyID, and perhaps we could establish a convention where a variant keeps the
-            KeyID for an exact match at the beginning of the list.
-        - An implementation that requires less lookup indirection would be to use the exact keys themselves,
-            (or perhaps meaningful keys. See [TableConfig::MEANINGFUL_KEY_LEN]) as the Rocks keys to the CF.
-            Then we would separate the exact keys from the "variants" CF, and keys themselves wouldn't be placed
-            into the "variants" CF.  Each variant entry would include all of the full keys that it is a variant of.
+        - A more compact implementation for longer keys would be to have a "KeyID" to reference each key entry. Then the entry would contain the key itself, and the [RecordID]s associated with the key in the same entry or in another CF that is also indexed by `KeyID`.  In this implementation, the variant CF is still used to find the KeyID, and perhaps we could establish a convention where a variant keeps the KeyID for an exact match at the beginning of the list.
 
-        The decision about which of these implementations is better depends on the average key length.  A 64-bit
-        KeyID is the equivalent of an 8-byte key, but an average key is around 16 bytes.  On the other hand,
-        eliminating the indirection associated with a second DB query might tip the scales in favor of embedding
+        - An implementation that requires less lookup indirection would be to use the exact keys themselves, (or perhaps meaningful keys. See [TableConfig::MEANINGFUL_KEY_LEN]) as the Rocks keys to the CF. Then we would separate the exact keys from the "variants" CF, and keys themselves wouldn't be placed into the "variants" CF.  Each variant entry would include all of the full keys that it is a variant of.
+
+        The decision about which of these implementations is better depends on the average key length.  A 64-bit KeyID is the equivalent of an 8-byte key, but an average key is around 16 bytes.  On the other hand, eliminating the indirection associated with a second DB query might tip the scales in favor of embedding
         the keys directly.
-    
-    - The changes above address many records with the same keys, but we may still want to retain the optimization
-        where many similar keys are implemented under only one `KeyGroupID` in a variant entry, instead of one
-        reference for each individual key.  Especially if those keys are fetched together often.
-    
+
+    - The changes above address many records with the same keys, but we may still want to retain the optimization where many similar keys are implemented under only one `KeyGroupID` in a variant entry, instead of one reference for each individual key.  Especially if those keys are fetched together often.
+
         So, I believe the best path forward looks more like the first option above.  So we would:
-        
-        - Rework the `KeyGroupID` so it no longer implies a [RecordID] within its lower 44 bits, and is instead
-            a completely different number, assigned as needed.
+
+        - Rework the `KeyGroupID` so it no longer implies a [RecordID] within its lower 44 bits, and is instead a completely different number, assigned as needed.
 
         - Rework the key_group entries so that each key is associated with a list of [RecordID]s.
 
-        - Rework the "rec_data" CF, so that, instead of a list of key_group indices (which are then converted
-            into `KeyGroupID`s), the "rec_data" entry would store the complete list of keys for the record.
+        - Rework the "rec_data" CF, so that, instead of a list of key_group indices (which are then converted into `KeyGroupID`s), the "rec_data" entry would store the complete list of keys for the record.
 
-        I believe this approach will improve lookup performance when there are many similar keys belonging to
-        different records.  I can identify several downsides however:
+        I believe this approach will improve lookup performance when there are many similar keys belonging to different records.  I can identify several downsides however:
 
-        - The lookup_exact function no longer has the existing fast path because it must pull the key_group
-            entry no matter what, in order to get the [RecordID]s.  This can be partially ameliorated by moving
-            the exact match key_group to the beginning of a variant's list.  In addition, the current fast-path
-            has a BUG! (see item 8. in this list.)
+        - The lookup_exact function no longer has the existing fast path because it must pull the key_group entry no matter what, in order to get the [RecordID]s.  This can be partially ameliorated by moving the exact match key_group to the beginning of a variant's list.  In addition, the current fast-path has a BUG! (see item 8. in this list.)
 
-        - The key_group entry will be more expensive to parse on account of it containing a vector of [RecordID]s
-            associated with each key.  However, this will be offset by needing to load many fewer key_group
-            entries, so I think this may be a net win - or at least a wash.
+        - The key_group entry will be more expensive to parse on account of it containing a vector of [RecordID]s associated with each key.  However, this will be offset by needing to load many fewer key_group entries, so I think this may be a net win - or at least a wash.
 
-        - The "rec_data" CF will bloat as each key group index (about 1 byte) is replaced by a whole key (avg 16
-            bytes).  However, the rec_data is only loaded for bookkeeping operations, and doesn't figure into the
-            fuzzy lookup speed.  Therefore the main impact will be DB size, and we can expect a 5-10% increase
-            from this factor.
+        - The "rec_data" CF will bloat as each key group index (about 1 byte) is replaced by a whole key (avg 16 bytes).  However, the rec_data is only loaded for bookkeeping operations, and doesn't figure into the fuzzy lookup speed.  Therefore the main impact will be DB size, and we can expect a 5-10% increase from this factor.
 
 2. BK-Tree search within a key-group.  If we end up with many proximate keys, there may be an advantage to having
     a secondary search structure within the table.  In fact, I think a BL-Tree always outperforms a list, so
@@ -314,6 +282,13 @@ DB contents are encoded using the [bincode] crate.  Currently the database conta
 
 ## Release History
 
+### 0.3.0
+- Abstract encode/decode format in database
+- Transition default format from [Bincode](https://docs.rs/crate/bincode/latest) to [MessagePack](https://msgpack.org/index.html)
+
+### 0.2.2
+- Fix for logic bug that would cause some results to be missed
+
 ### 0.2.0
 - Multi-key support. Records may now be associated with more than one key
 - Lookup_best now returns an iterator instead of one arbitrarily-chosen record
@@ -336,7 +311,4 @@ DB contents are encoded using the [bincode] crate.  Currently the database conta
 
 ## Misc
 
-**NOTE**: The included `geonames_megacities.txt` file is a stub for the `geonames_test`, designed to stress-test
-this crate.  The abriged file is included so the test will pass regardless, and to avoid bloating the
-download.  The content of `geonames_megacities.txt` was derived from data on [geonames.org](http://geonames.org),
-and licensed under a [Creative Commons Attribution 4.0 License](https://creativecommons.org/licenses/by/4.0/legalcode)
+**NOTE**: The included `geonames_megacities.txt` file is a stub for the `geonames_test`, designed to stress-test this crate.  The abriged file is included so the test will pass regardless, and to avoid bloating the download.  The content of `geonames_megacities.txt` was derived from data on [geonames.org](http://geonames.org), and licensed under a [Creative Commons Attribution 4.0 License](https://creativecommons.org/licenses/by/4.0/legalcode)
