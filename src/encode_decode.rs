@@ -5,7 +5,8 @@
 /// Wraps an interface to an encode / decode format
 ///
 /// NOTE: It's unlikely you will want to implement this trait.  Instead use one of the existing
-/// implementations: [BincodeCoder](crate::BincodeCoder) and [MsgPackCoder](crate::MsgPackCoder)
+/// implementations: [BincodeCoder](crate::BincodeCoder) and [MsgPackCoder](crate::MsgPackCoder),
+/// or use [DefaultCoder](crate::DefaultCoder)
 ///
 /// NOTE: `fmt1` and `fmt2` allow the a coder to use two different formats.  Originally this was
 /// done for BinCode's `varint` and `fixint` formats, where `fmt1` was the more compact, while
@@ -57,9 +58,7 @@ pub(crate) mod bincode_interface {
     use super::*;
     use bincode::Options;
     use bincode::config::*;
-
-    mod bincode_helpers;
-    use bincode_helpers::*;
+    use crate::bincode_helpers::*;
 
     #[derive(Clone)]
     pub struct BincodeCoder {

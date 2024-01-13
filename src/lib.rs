@@ -21,8 +21,18 @@ pub use perf_counters::PerfCounterFields;
 #[cfg(feature = "bincode")]
 pub use encode_decode::bincode_interface::BincodeCoder;
 
+#[cfg(feature = "bincode")]
+#[allow(dead_code)]
+mod bincode_helpers;
+
 #[cfg(feature = "msgpack")]
 pub use encode_decode::msgpack_interface::MsgPackCoder;
+
+#[cfg(feature = "msgpack")]
+pub type DefaultCoder = MsgPackCoder;
+
+#[cfg(all(feature = "bincode", not(feature = "msgpack")))]
+pub type DefaultCoder = BincodeCoder;
 
 #[cfg(test)]
 mod tests {
@@ -61,7 +71,7 @@ mod tests {
             type KeyCharT = char;
             type DistanceT = u8;
             type ValueT = i32;
-            type CoderT = crate::MsgPackCoder;
+            type CoderT = DefaultCoder;
         }
         let mut table = Table::<Config, true>::new("geonames.rocks", Config()).unwrap();
 
@@ -117,7 +127,7 @@ mod tests {
 
             //Separate the comma-separated alternatenames field
             let mut names : HashSet<String> = HashSet::from_iter(geoname.alternatenames.split(',').map(|string| string.to_lowercase()));
-            
+
             //Add the primary name for the place
             names.insert(geoname.name.to_lowercase());
 
@@ -168,7 +178,7 @@ mod tests {
             type KeyCharT = char;
             type DistanceT = u8;
             type ValueT = String;
-            type CoderT = crate::MsgPackCoder;
+            type CoderT = DefaultCoder;
             const MEANINGFUL_KEY_LEN : usize = 8;
         }
         let mut table = Table::<Config, true>::new("basic_test.rocks", Config()).unwrap();
@@ -271,7 +281,7 @@ mod tests {
         //Attempt to replace a record's keys with an empty list, check the error
         let empty_slice : &[&str] = &[];
         assert!(table.replace_keys(sat, empty_slice).is_err());
-        
+
         //Attempt to replace an invalid record and confirm we get a reasonable error
         assert!(table.replace_keys(RecordID::NULL, &["Nullday"]).is_err());
         assert!(table.replace_value(RecordID::NULL, &"Null".to_string()).is_err());
@@ -391,7 +401,7 @@ mod tests {
             type KeyCharT = u8;
             type DistanceT = u8;
             type ValueT = f32;
-            type CoderT = crate::MsgPackCoder;
+            type CoderT = DefaultCoder;
             const MAX_DELETES : usize = 1;
             const MEANINGFUL_KEY_LEN : usize = 8;
             const UTF8_KEYS : bool = false;
@@ -425,7 +435,7 @@ mod tests {
             type KeyCharT = char;
             type DistanceT = u8;
             type ValueT = i32;
-            type CoderT = crate::MsgPackCoder;
+            type CoderT = DefaultCoder;
         }
         let table = Table::<Config, true>::new("all_cities.geonames.rocks", Config()).unwrap();
 

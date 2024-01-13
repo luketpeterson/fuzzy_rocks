@@ -78,7 +78,7 @@ impl TableConfig for Config {
     type KeyCharT = Nucleobase;
     type DistanceT = u8;
     type ValueT = usize;
-    type CoderT = MsgPackCoder;
+    type CoderT = DefaultCoder;
     const UTF8_KEYS : bool = false;
     const MAX_DELETES : usize = 2;
     const MEANINGFUL_KEY_LEN : usize = 24;
@@ -275,7 +275,7 @@ Depending on the [Coder] used, DB contents are encoded using either [Bincode](ht
 
 ### 0.3.0
 - Abstract encode/decode format in database
-- Transition default format from [Bincode](https://docs.rs/crate/bincode/latest) to [MessagePack](https://msgpack.org/index.html)
+- Adding [MessagePack](https://msgpack.org/index.html) format, although [Bincode](https://docs.rs/crate/bincode/latest) remains the default
 
 ### 0.2.2
 - Fix for logic bug that would cause some results to be missed

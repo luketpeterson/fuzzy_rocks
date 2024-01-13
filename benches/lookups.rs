@@ -13,9 +13,10 @@ pub fn lookup_benchmark(c: &mut Criterion) {
         type KeyCharT = char;
         type DistanceT = u8;
         type ValueT = i32;
+        type CoderT = DefaultCoder;
     }
     let table = Table::<Config, true>::new("all_cities.geonames.rocks", Config()).unwrap();
-    
+
     c.bench_function("lookup_exact_london", |b| b.iter(|| black_box( {
         let iter = table.lookup_exact("london").unwrap();
         let _ = iter.count();

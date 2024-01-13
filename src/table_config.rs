@@ -31,7 +31,7 @@ pub const MAX_KEY_LENGTH : usize = 95;
 ///     type KeyCharT = char;
 ///     type DistanceT = u8;
 ///     type ValueT = String;
-///     type CoderT = MsgPackCoder;
+///     type CoderT = DefaultCoder;
 ///     const UTF8_KEYS : bool = true;
 ///     const MAX_DELETES : usize = 2;
 ///     const MEANINGFUL_KEY_LEN : usize = 12;
@@ -259,7 +259,7 @@ impl TableConfig for DefaultTableConfig {
     type KeyCharT = char;
     type DistanceT =  u8;
     type ValueT = String;
-    type CoderT = crate::MsgPackCoder;
+    type CoderT = crate::DefaultCoder;
     const UTF8_KEYS : bool = true;
     const MAX_DELETES : usize = 2;
     const MEANINGFUL_KEY_LEN : usize = 12;
