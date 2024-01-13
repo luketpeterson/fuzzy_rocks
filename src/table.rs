@@ -6,16 +6,15 @@ use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::Entry;
 
 use num_traits::Zero;
-use serde::{Serialize};
+use serde::Serialize;
 
 use super::records::RecordID;
-use super::key::{*};
-use super::database::{*};
-use super::table_config::{*};
-use super::sym_spell::{*};
-use super::key_groups::{*};
-use super::bincode_helpers::{*};
-use super::perf_counters::{*};
+use super::key::*;
+use super::database::*;
+use super::table_config::*;
+use super::sym_spell::*;
+use super::key_groups::*;
+use super::perf_counters::*;
 use crate::Coder;
 
 /// A collection containing records that may be searched using [Key]s
@@ -33,6 +32,7 @@ use crate::Coder;
 pub struct Table<ConfigT : TableConfig, const UTF8_KEYS : bool> {
     record_count : usize,
     db : DBConnection<ConfigT::CoderT>,
+    coder: ConfigT::CoderT,
     config : ConfigT,
     deleted_records : Vec<RecordID>, //NOTE: Currently we don't try to hold onto deleted records across unloads, but we may change this in the future.
     perf_counters : PerfCounters,
@@ -89,6 +89,7 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
             record_count,
             config,
             db,
+            coder: ConfigT::CoderT::new(),
             deleted_records : vec![],
             perf_counters : PerfCounters::new(),
         })
@@ -403,10 +404,10 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
 
     /// Visits all possible candidate keys for a given fuzzy search key, based on config.max_deletes,
     /// and invokes the supplied closure for each candidate KeyGroup found.
-    /// 
+    ///
     /// NOTE: The same group may be found via multiple variants.  It is the responsibility of
     /// the closure to avoid doing duplicate work.
-    /// 
+    ///
     /// QUESTION: should the visitor closure be able to return a bool, to mean "stop" or "keep going"?
     fn visit_fuzzy_candidates<K, F : FnMut(KeyGroupID)>(&self, key : &K, mut visitor : F) -> Result<(), String>
         where
@@ -437,10 +438,11 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
                 }
                 self.perf_counters.set(counter_fields);
             }
-    
+
             // Call the visitor for each KeyGroup we found
-            for key_group_id_bytes in bincode_vec_iter::<KeyGroupID>(variant_vec_bytes) {
-                visitor(KeyGroupID::from(usize::from_le_bytes(key_group_id_bytes.try_into().unwrap())));
+            let decoded_vec : Vec<KeyGroupID> = self.coder.decode_fmt2_from_bytes(variant_vec_bytes).unwrap();
+            for key_group_id in decoded_vec {
+                visitor(key_group_id);
             }
         })
     }
@@ -504,12 +506,12 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
             //QUESTION: Should we have an alternate fast path that only evaluates until we find
             // any distance smaller than threshold?  It would mean we couldn't return a reliable
             // distance but would save us evaluating distance for potentially many keys
-            
+
             if !visited_groups.contains(&key_group_id) {
 
                 //Check the record's keys with the distance function and find the smallest distance
                 let mut record_keys_iter = self.db.get_keys_in_group::<<Self as TableKeyEncoding>::OwnedKeyT>(key_group_id, &self.perf_counters).unwrap();
-                
+
                 let record_key = record_keys_iter.next().unwrap(); //If we have a zero-element keys array, it's a bug elsewhere, so this unwrap should always succeed
                 let record_key_chars = record_key.move_into_buf(&mut key_chars_buf);
                 let mut smallest_distance = distance_function(&record_key_chars[..], looup_key_chars);
@@ -634,24 +636,22 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
                     fields.variant_load_count += 1;
                     fields.key_group_ref_count += num_key_group_ids;
                 } );
-            }        
+            }
 
             record_ids = if meaningful_noop {
 
                 //If the meaningful_key exactly equals our key, we can just return the variant's results
-                bincode_vec_iter::<KeyGroupID>(variant_vec_bytes).map(|key_group_id_bytes| {
-                    KeyGroupID::from(usize::from_le_bytes(key_group_id_bytes.try_into().unwrap()))
-                }).map(|key_group_id| key_group_id.record_id()).collect()
+                let decoded_vec : Vec<KeyGroupID> = self.coder.decode_fmt2_from_bytes(variant_vec_bytes).unwrap();
+                decoded_vec.into_iter().map(|key_group_id| key_group_id.record_id()).collect()
 
             } else {
 
                 //But if they are different, we need to Iterate every KeyGroupID in the variant in order
                 //  to check if we really have a match on the whole key
                 let owned_lookup_key = <Self as TableKeyEncoding>::OwnedKeyT::from_key(lookup_key);
-                bincode_vec_iter::<KeyGroupID>(variant_vec_bytes)
-                .filter_map(|key_group_id_bytes| {
-                    let key_group_id = KeyGroupID::from(usize::from_le_bytes(key_group_id_bytes.try_into().unwrap()));
-                    
+                let decoded_vec : Vec<KeyGroupID> = self.coder.decode_fmt2_from_bytes(variant_vec_bytes).unwrap();
+                decoded_vec.into_iter().filter_map(|key_group_id| {
+
                     // Return only the KeyGroupIDs for records if their keys match the key we are looking up
                     let mut keys_iter = self.db.get_keys_in_group::<<Self as TableKeyEncoding>::OwnedKeyT>(key_group_id, &self.perf_counters).ok()?;
                     if keys_iter.any(|key| key == owned_lookup_key) {

@@ -1,9 +1,9 @@
 //!
 //! The SymSpell module contains the logic for computing and searching for key variants
-//! 
+//!
 
 use core::marker::PhantomData;
-use std::collections::{HashSet};
+use std::collections::HashSet;
 
 use super::unicode_string_helpers::{*};
 use super::key::{*};
@@ -23,7 +23,7 @@ impl <OwnedKeyT, const UTF8_KEYS : bool>SymSpell<OwnedKeyT, UTF8_KEYS> {
     {
 
         let mut variants_set : HashSet<Vec<u8>> = HashSet::new();
-        
+
         //We shouldn't make any variants for empty keys
         if key.num_chars() > 0 {
 

@@ -2,7 +2,6 @@
 #![doc = include_str!("../README.md")]
 
 pub mod unicode_string_helpers;
-mod bincode_helpers;
 mod database;
 mod key;
 pub use key::Key;
@@ -16,10 +15,14 @@ mod perf_counters;
 mod table;
 mod encode_decode;
 pub use encode_decode::Coder;
-pub use encode_decode::bincode_interface::BincodeCoder;
 pub use table::Table;
 pub use perf_counters::PerfCounterFields;
 
+#[cfg(feature = "bincode")]
+pub use encode_decode::bincode_interface::BincodeCoder;
+
+#[cfg(feature = "msgpack")]
+pub use encode_decode::msgpack_interface::MsgPackCoder;
 
 #[cfg(test)]
 mod tests {
@@ -51,14 +54,14 @@ mod tests {
         // Alternate geonames file
         // NOTE: Uncomment this to use a different file
         // let geonames_file_path = PathBuf::from("/path/to/file/cities500.txt");
-    
+
         //Create the FuzzyRocks Table with an appropriate config
         struct Config();
         impl TableConfig for Config {
             type KeyCharT = char;
             type DistanceT = u8;
             type ValueT = i32;
-            type CoderT = crate::BincodeCoder;
+            type CoderT = crate::MsgPackCoder;
         }
         let mut table = Table::<Config, true>::new("geonames.rocks", Config()).unwrap();
 
@@ -165,7 +168,7 @@ mod tests {
             type KeyCharT = char;
             type DistanceT = u8;
             type ValueT = String;
-            type CoderT = crate::BincodeCoder;
+            type CoderT = crate::MsgPackCoder;
             const MEANINGFUL_KEY_LEN : usize = 8;
         }
         let mut table = Table::<Config, true>::new("basic_test.rocks", Config()).unwrap();
@@ -388,7 +391,7 @@ mod tests {
             type KeyCharT = u8;
             type DistanceT = u8;
             type ValueT = f32;
-            type CoderT = crate::BincodeCoder;
+            type CoderT = crate::MsgPackCoder;
             const MAX_DELETES : usize = 1;
             const MEANINGFUL_KEY_LEN : usize = 8;
             const UTF8_KEYS : bool = false;
@@ -422,7 +425,7 @@ mod tests {
             type KeyCharT = char;
             type DistanceT = u8;
             type ValueT = i32;
-            type CoderT = crate::BincodeCoder;
+            type CoderT = crate::MsgPackCoder;
         }
         let table = Table::<Config, true>::new("all_cities.geonames.rocks", Config()).unwrap();
 

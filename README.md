@@ -78,7 +78,7 @@ impl TableConfig for Config {
     type KeyCharT = Nucleobase;
     type DistanceT = u8;
     type ValueT = usize;
-    type CoderT = BincodeCoder;
+    type CoderT = MsgPackCoder;
     const UTF8_KEYS : bool = false;
     const MAX_DELETES : usize = 2;
     const MEANINGFUL_KEY_LEN : usize = 24;
@@ -182,24 +182,15 @@ cargo bench -- --nocapture
 
 ## Database Format
 
-DB contents are encoded using the [bincode] crate.  Currently the database contains 4 Column Families.
+Depending on the [Coder] used, DB contents are encoded using either [Bincode](https://docs.rs/crate/bincode/latest) crate or [MessagePack](https://msgpack.org/index.html).  Currently the database contains 4 Column Families.
 
-1. The "rec_data" CF uses a little-endian-encoded [RecordID] as its key, and stores a varint-encoded `Vec` of
-    integers, which represent key_group indices, each of which can be combined with a `RecordID` to create a
-    `KeyGroupID`.  Each referenced key_group contains at least one key associated with the record.
-    The `rec_data` CF is the place to start when constructing the complete set of keys associated with a record.
+1. The "rec_data" CF uses a little-endian-encoded [RecordID] as its key, and stores a varint-encoded `Vec` of integers, which represent key_group indices, each of which can be combined with a `RecordID` to create a `KeyGroupID`.  Each referenced key_group contains at least one key associated with the record. The `rec_data` CF is the place to start when constructing the complete set of keys associated with a record.
 
-2. The "keys" CF uses a little-endian-encoded `KeyGroupID` as its key, and stores a varint-encoded `Vec` of
-    OwnedKeys (think Strings), each representing a key in a key_group.  In the present implementation,
-    a given key_group only stores keys for a single record, and the `KeyGroupID` embeds the associated
-    [RecordID] in its lower 44 bits.  This scheme is likely to change in the future.
+2. The "keys" CF uses a little-endian-encoded `KeyGroupID` as its key, and stores a varint-encoded `Vec` of OwnedKeys (think Strings), each representing a key in a key_group.  In the present implementation, a given key_group only stores keys for a single record, and the `KeyGroupID` embeds the associated [RecordID] in its lower 44 bits.  This scheme is likely to change in the future.
 
-3. The "variants" CF uses a serialized key variant as its key, and stores a fixint-encoded `Vec` of
-    `KeyGroupID`s representing every key_group that holds a key that can be reduced to this variant.
-    Complete key strings themselves are represented as variants in this CF.
+3. The "variants" CF uses a serialized key variant as its key, and stores a fixint-encoded `Vec` of `KeyGroupID`s representing every key_group that holds a key that can be reduced to this variant. Complete key strings themselves are represented as variants in this CF.
 
-4. The "values" CF uses a little-endian-encoded [RecordID] as its key, and stores the [bincode] serialized
-    [ValueT](TableConfig::ValueT) associated with the record.
+4. The "values" CF uses a little-endian-encoded [RecordID] as its key, and stores the [ValueT](TableConfig::ValueT) associated with the record.
 
 ## Future Work
 

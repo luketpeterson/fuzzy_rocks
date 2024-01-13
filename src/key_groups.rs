@@ -22,9 +22,6 @@ use crate::Coder;
 #[derive(Copy, Debug, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, derive_more::Display, Serialize, Deserialize)]
 pub struct KeyGroupID(usize);
 impl KeyGroupID {
-    pub fn from(id : usize) -> Self {
-        KeyGroupID(id)
-    }
     pub fn from_record_and_idx(record_id : RecordID, group_idx : usize) -> Self {
         //Panic if we have more than the allowed number of records
         if record_id.0 > 0xFFFFFFFFFFF {
