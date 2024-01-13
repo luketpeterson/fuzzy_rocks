@@ -109,7 +109,7 @@ impl<C: Coder> DBConnection<C> {
 
         let rec_data_cf_handle = self.db.cf_handle(RECORD_DATA_CF_NAME).unwrap();
         if let Some(rec_data_vec_bytes) = self.db.get_pinned_cf(rec_data_cf_handle, record_id.to_le_bytes())? {
-            let rec_data : RecordData = self.coder.decode_varint_owned_from_bytes(&rec_data_vec_bytes).unwrap();
+            let rec_data : RecordData = self.coder.decode_varint_from_bytes(&rec_data_vec_bytes).unwrap();
 
             if !rec_data.key_groups.is_empty() {
                 Ok(rec_data.key_groups.into_iter().map(move |group_idx| KeyGroupID::from_record_and_idx(record_id, group_idx)))
@@ -143,7 +143,7 @@ impl<C: Coder> DBConnection<C> {
         //Get the keys vec by deserializing the bytes from the db
         let keys_cf_handle = self.db.cf_handle(KEYS_CF_NAME).unwrap();
         if let Some(keys_vec_bytes) = self.db.get_pinned_cf(keys_cf_handle, key_group.to_le_bytes())? {
-            let keys_vec : Vec<OwnedKeyT> = self.coder.decode_varint_owned_from_bytes(&keys_vec_bytes).unwrap();
+            let keys_vec : Vec<OwnedKeyT> = self.coder.decode_varint_from_bytes(&keys_vec_bytes).unwrap();
 
             #[cfg(feature = "perf_counters")]
             {
@@ -211,7 +211,7 @@ impl<C: Coder> DBConnection<C> {
         //Get the value object by deserializing the bytes from the db
         let values_cf_handle = self.db.cf_handle(VALUES_CF_NAME).unwrap();
         if let Some(value_bytes) = self.db.get_pinned_cf(values_cf_handle, record_id.to_le_bytes())? {
-            let value : ValueT = self.coder.decode_varint_owned_from_bytes(&value_bytes).unwrap();
+            let value : ValueT = self.coder.decode_varint_from_bytes(&value_bytes).unwrap();
 
             Ok(value)
         } else {
@@ -297,8 +297,8 @@ impl<C: Coder> DBConnection<C> {
                 //If the variant entry references more than one record, rebuild it with our records absent
                 if variant_entry_len > 1 {
                     let mut new_vec : Vec<KeyGroupID> = Vec::with_capacity(variant_entry_len-1);
-                    for key_group_id_bytes in self.coder.fixint_list_iter::<KeyGroupID>(&variant_entry_bytes).unwrap() {
-                        let other_key_group_id = KeyGroupID::from(usize::from_le_bytes(key_group_id_bytes.try_into().unwrap()));
+                    let decoded_vec : Vec<KeyGroupID> = self.coder.decode_fixint_from_bytes(&variant_entry_bytes).unwrap();
+                    for other_key_group_id in decoded_vec {
                         if other_key_group_id != key_group {
                             new_vec.push(other_key_group_id);
                         }
@@ -360,7 +360,7 @@ fn variant_append_merge<C: Coder>(coder: &C, _key: &[u8], existing_val: Option<&
     //Deserialize the existing database entry into a vec of KeyGroupIDs
     //NOTE: we're actually using a HashSet because we don't want any duplicates
     let mut variant_vec = if let Some(existing_bytes) = existing_val {
-        let new_vec : HashSet<KeyGroupID> = coder.decode_fixint_owned_from_bytes(existing_bytes).unwrap();
+        let new_vec : HashSet<KeyGroupID> = coder.decode_fixint_from_bytes(existing_bytes).unwrap();
         new_vec
     } else {
         //TODO: Remove status println!()
@@ -371,7 +371,7 @@ fn variant_append_merge<C: Coder>(coder: &C, _key: &[u8], existing_val: Option<&
     //Add the new KeyGroupID(s)
     for op in operands_iter {
         //Deserialize the vec on the operand, and merge its entries into the existing vec
-        let operand_vec : HashSet<KeyGroupID> = coder.decode_fixint_owned_from_bytes(op).unwrap();
+        let operand_vec : HashSet<KeyGroupID> = coder.decode_fixint_from_bytes(op).unwrap();
         variant_vec.extend(operand_vec);
     }
 

@@ -7,7 +7,6 @@
 /// NOTE: It's unlikely you will want to implement this trait.  Instead use one of the existing
 /// implementations: [BincodeCoder](crate::BincodeCoder) and [MsgPackCoder](crate::MsgPackCoder)
 pub trait Coder: Clone + Send + Sync + 'static {
-    type FixintListIter<'a, I: Copy + Sized + 'static>: Iterator<Item=&'a [u8]>;
 
     /// Create a new coder
     fn new() -> Self;
@@ -16,7 +15,7 @@ pub trait Coder: Clone + Send + Sync + 'static {
     fn encode_varint_to_buf<T: serde::ser::Serialize>(&self, obj: &T) -> Result<Vec<u8>, String>;
 
     /// Decodes an arbitrary structure from bytes using a variable integer size encoding
-    fn decode_varint_owned_from_bytes<T: serde::de::DeserializeOwned>(&self, bytes: &[u8]) -> Result<T, String>;
+    fn decode_varint_from_bytes<'a, T: serde::de::Deserialize<'a>>(&self, bytes: &'a [u8]) -> Result<T, String>;
 
     /// Encodes a list of items to a buffer using a variable integer size encoding
     ///
@@ -34,7 +33,7 @@ pub trait Coder: Clone + Send + Sync + 'static {
     fn encode_fixint_to_buf<T: serde::ser::Serialize>(&self, obj: &T) -> Result<Vec<u8>, String>;
 
     /// Decodes an arbitrary structure from bytes using a variable integer size encoding
-    fn decode_fixint_owned_from_bytes<T: serde::de::DeserializeOwned>(&self, bytes: &[u8]) -> Result<T, String>;
+    fn decode_fixint_from_bytes<'a, T: serde::de::Deserialize<'a>>(&self, bytes: &'a [u8]) -> Result<T, String>;
 
     /// Encodes a list of items to a buffer using a fixed integer size encoding
     ///
@@ -48,11 +47,6 @@ pub trait Coder: Clone + Send + Sync + 'static {
     ///
     /// WARNING: This method assumes the bytes were encoded with [encode_fixint_list_to_buf](Self::encode_fixint_list_to_buf)
     fn fixint_list_len(&self, bytes: &[u8]) -> Result<usize, String>;
-
-    /// Returns an iterator over the sub-slices within `bytes` that correspond to each item in the list
-    ///
-    /// WARNING: This method assumes the bytes were encoded with [encode_fixint_list_to_buf](Self::encode_fixint_list_to_buf)
-    fn fixint_list_iter<'a, I: Copy + Sized + 'static>(&self, bytes: &'a [u8]) -> Result<Self::FixintListIter<'a, I>, String>;
 
 }
 
@@ -73,7 +67,6 @@ pub(crate) mod bincode_interface {
     }
 
     impl Coder for BincodeCoder {
-        type FixintListIter<'a, I: Copy + Sized + 'static> = BinCodeVecIterator<'a, I>;
 
         fn new() -> Self {
             Self {
@@ -84,8 +77,8 @@ pub(crate) mod bincode_interface {
         fn encode_varint_to_buf<T: serde::ser::Serialize>(&self, obj: &T) -> Result<Vec<u8>, String> {
             self.varint_coder.serialize(obj).map_err(|e| format!("Encode error: {e}"))
         }
-        fn decode_varint_owned_from_bytes<T: serde::de::DeserializeOwned>(&self, bytes: &[u8]) -> Result<T, String> {
-            self.varint_coder.deserialize(&bytes).map_err(|e| format!("Decode error: {e}"))
+        fn decode_varint_from_bytes<'a, T: serde::de::Deserialize<'a>>(&self, bytes: &'a [u8]) -> Result<T, String> {
+            self.varint_coder.deserialize(bytes).map_err(|e| format!("Decode error: {e}"))
         }
         fn encode_varint_list_to_buf<T: serde::ser::Serialize + IntoIterator>(&self, list: &T) -> Result<Vec<u8>, String> {
             self.encode_varint_to_buf(list)
@@ -94,14 +87,14 @@ pub(crate) mod bincode_interface {
 
             //The vector element count should be the first encoded usize
             let mut skip_bytes = 0;
-            let keys_count = bincode_u64_le_varint(bytes, &mut skip_bytes);
-            Ok(keys_count as usize)
+            let element_cnt = bincode_u64_le_varint(bytes, &mut skip_bytes);
+            Ok(element_cnt as usize)
         }
         fn encode_fixint_to_buf<T: serde::ser::Serialize>(&self, obj: &T) -> Result<Vec<u8>, String> {
             self.fixint_coder.serialize(obj).map_err(|e| format!("Encode error: {e}"))
         }
-        fn decode_fixint_owned_from_bytes<T: serde::de::DeserializeOwned>(&self, bytes: &[u8]) -> Result<T, String> {
-            self.fixint_coder.deserialize(&bytes).map_err(|e| format!("Decode error: {e}"))
+        fn decode_fixint_from_bytes<'a, T: serde::de::Deserialize<'a>>(&self, bytes: &'a [u8]) -> Result<T, String> {
+            self.fixint_coder.deserialize(bytes).map_err(|e| format!("Decode error: {e}"))
         }
         fn encode_fixint_list_to_buf<T: serde::ser::Serialize + IntoIterator<Item=I>, I: Sized + Copy>(&self, list: &T) -> Result<Vec<u8>, String> {
             self.fixint_coder.serialize(list).map_err(|e| format!("Encode error: {e}"))
@@ -109,9 +102,44 @@ pub(crate) mod bincode_interface {
         fn fixint_list_len(&self, bytes: &[u8]) -> Result<usize, String> {
             Ok(bincode_vec_fixint_len(bytes))
         }
-        fn fixint_list_iter<'a, I: Copy + Sized + 'static>(&self, bytes: &'a [u8]) -> Result<Self::FixintListIter<'a, I>, String> {
-            Ok(bincode_vec_iter::<I>(bytes))
+    }
+}
+
+#[cfg(feature = "msgpack")]
+pub(crate) mod msgpack_interface {
+    use super::*;
+
+    #[derive(Clone)]
+    pub struct MsgPackCoderoder;
+
+    impl Coder for MsgPackCoderoder {
+        fn new() -> Self {
+            Self
+        }
+        fn encode_varint_to_buf<T: serde::ser::Serialize>(&self, obj: &T) -> Result<Vec<u8>, String> {
+            rmp_serde::encode::to_vec(obj).map_err(|e| format!("Encode error: {e}"))
+        }
+        fn decode_varint_from_bytes<'a, T: serde::de::Deserialize<'a>>(&self, bytes: &'a [u8]) -> Result<T, String> {
+            rmp_serde::decode::from_slice(bytes).map_err(|e| format!("Decode error: {e}"))
+        }
+        fn encode_varint_list_to_buf<T: serde::ser::Serialize + IntoIterator>(&self, list: &T) -> Result<Vec<u8>, String> {
+            self.encode_varint_to_buf(list)
+        }
+        fn varint_list_len(&self, bytes: &[u8]) -> Result<usize, String> {
+            let element_cnt = rmp::decode::read_array_len(&mut &bytes[..]).map_err(|e| format!("Decode error: {e}"))?;
+            Ok(element_cnt as usize)
+        }
+        fn encode_fixint_to_buf<T: serde::ser::Serialize>(&self, obj: &T) -> Result<Vec<u8>, String> {
+            self.encode_varint_to_buf(obj)
+        }
+        fn decode_fixint_from_bytes<'a, T: serde::de::Deserialize<'a>>(&self, bytes: &'a [u8]) -> Result<T, String> {
+            self.decode_varint_from_bytes(bytes)
+        }
+        fn encode_fixint_list_to_buf<T: serde::ser::Serialize + IntoIterator<Item=I>, I: Sized + Copy>(&self, list: &T) -> Result<Vec<u8>, String> {
+            self.encode_varint_list_to_buf(list)
+        }
+        fn fixint_list_len(&self, bytes: &[u8]) -> Result<usize, String> {
+            self.varint_list_len(bytes)
         }
     }
-
 }
