@@ -143,3 +143,99 @@ pub(crate) mod msgpack_interface {
         }
     }
 }
+
+#[cfg(feature = "bitcode")]
+pub(crate) mod bitcode_interface {
+    use super::*;
+
+    #[derive(Debug, Default, Clone, Copy)]
+    pub struct BitcodeCoder;
+
+    impl Coder for BitcodeCoder {
+        fn new() -> Self {
+            Self
+        }
+        fn encode_fmt1_to_buf<T: serde::ser::Serialize>(&self, obj: &T) -> Result<Vec<u8>, String> {
+            bitcode::serialize(obj).map_err(|e| format!("Encode error: {e}"))
+        }
+        fn decode_fmt1_from_bytes<'a, T: serde::de::Deserialize<'a>>(&self, bytes: &'a [u8]) -> Result<T, String> {
+            bitcode::deserialize(bytes).map_err(|e| format!("Decode error: {e}"))
+        }
+        fn encode_fmt1_list_to_buf<T: serde::ser::Serialize + IntoIterator>(&self, list: &T) -> Result<Vec<u8>, String> {
+            self.encode_fmt1_to_buf(list)
+        }
+        fn fmt1_list_len(&self, bytes: &[u8]) -> Result<usize, String> {
+            if bytes[0] == 255 && bytes[1..].len() > 255 {
+              match bytes[1] {
+                4 => {
+                  let len_chars = &bytes[2..=3];
+                  let value = u16::from_le_bytes(
+                    len_chars
+                      .try_into()
+                      .map_err(|e| format!("Failed converting size bytes to u16: {e}"))?
+                  );
+                  Ok(value as usize)
+                }
+                2 => {
+                  let len_chars = &bytes[2..=5];
+                  let value = u32::from_le_bytes(
+                    len_chars
+                      .try_into()
+                      .map_err(|e| format!("Failed converting size bytes to u32: {e}"))?
+                  );
+                  Ok(value as usize)
+                }
+                1 => {
+                  let len_chars = &bytes[2..=10];
+                  let value = u64::from_le_bytes(
+                    len_chars
+                      .try_into()
+                      .map_err(|e| format!("Failed converting size bytes to u64: {e}"))?
+                  );
+                  Ok(value as usize)
+                }
+                0 => {
+                  let len_chars = &bytes[2..=17];
+                  let value = u128::from_le_bytes(
+                    len_chars
+                      .try_into()
+                      .map_err(|e| format!("Failed converting size bytes to u128: {e}"))?
+                  );
+                  Ok(value as usize)
+                }
+                _ => Ok(bytes[0] as usize)
+              }
+            } else {
+              Ok(bytes[0] as usize)
+            }
+        }
+        fn encode_fmt2_to_buf<T: serde::ser::Serialize>(&self, obj: &T) -> Result<Vec<u8>, String> {
+            self.encode_fmt1_to_buf(obj)
+        }
+        fn decode_fmt2_from_bytes<'a, T: serde::de::Deserialize<'a>>(&self, bytes: &'a [u8]) -> Result<T, String> {
+            self.decode_fmt1_from_bytes(bytes)
+        }
+        fn encode_fmt2_list_to_buf<T: serde::ser::Serialize + IntoIterator<Item=I>, I: Sized + Copy>(&self, list: &T) -> Result<Vec<u8>, String> {
+            self.encode_fmt1_list_to_buf(list)
+        }
+        fn fmt2_list_len(&self, bytes: &[u8]) -> Result<usize, String> {
+            self.fmt1_list_len(bytes)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Coder;
+
+  #[test]
+  fn test_encode_len() {
+    let coder = crate::DefaultCoder::new();
+
+    let data = coder.encode_fmt1_to_buf::<String>(&"test".to_string()).unwrap();
+
+    let len = coder.fmt1_list_len(&data).unwrap();
+    
+    assert_eq!(len , 4);
+  }
+}

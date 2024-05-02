@@ -28,13 +28,19 @@ mod bincode_helpers;
 #[cfg(feature = "msgpack")]
 pub use encode_decode::msgpack_interface::MsgPackCoder;
 
+#[cfg(feature = "bitcode")]
+pub use encode_decode::bitcode_interface::BitcodeCoder;
+
 #[cfg(feature = "msgpack")]
 //NOTE: Since "msgpack" is off by default, if the user enabled it they they probably
 // want to use it by default
 pub type DefaultCoder = MsgPackCoder;
 
-#[cfg(all(feature = "bincode", not(feature = "msgpack")))]
+#[cfg(all(feature = "bincode", not(feature = "msgpack"), not(feature = "bitcode")))]
 pub type DefaultCoder = BincodeCoder;
+
+#[cfg(all(feature = "bitcode", not(feature = "msgpack"), not(feature = "bincode")))]
+pub type DefaultCoder = BitcodeCoder;
 
 #[cfg(test)]
 mod tests {
