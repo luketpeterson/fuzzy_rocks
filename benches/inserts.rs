@@ -6,7 +6,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use fuzzy_rocks::{unicode_string_helpers::unicode_truncate, *};
 use serde::{Deserialize, Serialize};
 
-pub fn lookup_benchmark(c: &mut Criterion) {
+pub fn insert_benchmark(c: &mut Criterion) {
     //Configure and Create the FuzzyRocks Table using a very big database
     struct Config();
     impl TableConfig for Config {
@@ -102,5 +102,5 @@ pub fn lookup_benchmark(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, lookup_benchmark);
+criterion_group!(benches, insert_benchmark);
 criterion_main!(benches);
