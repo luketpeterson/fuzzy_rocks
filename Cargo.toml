@@ -30,6 +30,10 @@ criterion = "0.3"
 name = "lookups"
 harness = false
 
+[[bench]]
+name = "inserts"
+harness = false
+
 [features]
 default = ["bitcode"]
 perf_counters = []
