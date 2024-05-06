@@ -165,48 +165,30 @@ pub(crate) mod bitcode_interface {
             self.encode_fmt1_to_buf(list)
         }
         fn fmt1_list_len(&self, bytes: &[u8]) -> Result<usize, String> {
-            if bytes[0] == 255 && bytes[1..].len() > 255 {
-              match bytes[1] {
+            fn invalid_length() -> String {
+                "invalid length".to_owned()
+            }
+
+            let first = *bytes.get(0).ok_or_else(invalid_length)?;
+            if first < 255 {
+                return Ok(first as usize);
+            }
+
+            // 1, 3, 5, 7 cannot occur while encoding 1 length. 6 cannot occur at all.
+            match *bytes.get(1).ok_or_else(invalid_length)? {
                 4 => {
-                  let len_chars = &bytes[2..=3];
-                  let value = u16::from_le_bytes(
-                    len_chars
-                      .try_into()
-                      .map_err(|e| format!("Failed converting size bytes to u16: {e}"))?
-                  );
-                  Ok(value as usize)
+                    let len_chars = bytes.get(2..4).ok_or_else(invalid_length)?;
+                    Ok(u16::from_le_bytes(len_chars.try_into().unwrap()) as usize)
                 }
                 2 => {
-                  let len_chars = &bytes[2..=5];
-                  let value = u32::from_le_bytes(
-                    len_chars
-                      .try_into()
-                      .map_err(|e| format!("Failed converting size bytes to u32: {e}"))?
-                  );
-                  Ok(value as usize)
-                }
-                1 => {
-                  let len_chars = &bytes[2..=10];
-                  let value = u64::from_le_bytes(
-                    len_chars
-                      .try_into()
-                      .map_err(|e| format!("Failed converting size bytes to u64: {e}"))?
-                  );
-                  Ok(value as usize)
+                    let len_chars = bytes.get(2..6).ok_or_else(invalid_length)?;
+                    Ok(u32::from_le_bytes(len_chars.try_into().unwrap()) as usize)
                 }
                 0 => {
-                  let len_chars = &bytes[2..=17];
-                  let value = u128::from_le_bytes(
-                    len_chars
-                      .try_into()
-                      .map_err(|e| format!("Failed converting size bytes to u128: {e}"))?
-                  );
-                  Ok(value as usize)
+                    let len_chars = bytes.get(2..10).ok_or_else(invalid_length)?;
+                    Ok(u64::from_le_bytes(len_chars.try_into().unwrap()) as usize)
                 }
-                _ => Ok(bytes[0] as usize)
-              }
-            } else {
-              Ok(bytes[0] as usize)
+                _ => Err(invalid_length()),
             }
         }
         fn encode_fmt2_to_buf<T: serde::ser::Serialize>(&self, obj: &T) -> Result<Vec<u8>, String> {

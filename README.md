@@ -300,6 +300,8 @@ Depending on the [Coder] used, DB contents are encoded using either [Bincode](ht
 
 - [@Linus789](https://github.com/Linus789) found and fixed a logic bug in for v.0.2.2
 
+- [@0x07C0](https://github.com/0x07C0) added [bitcode](https://github.com/SoftbearStudios/bitcode) support with help from bitcode author [@caibear](https://caibear.com/), resulting in a 2x speedup for certain lookup operations
+
 ## Misc
 
 **NOTE**: The included `geonames_megacities.txt` file is a stub for the `geonames_test`, designed to stress-test this crate.  The abriged file is included so the test will pass regardless, and to avoid bloating the download.  The content of `geonames_megacities.txt` was derived from data on [geonames.org](http://geonames.org), and licensed under a [Creative Commons Attribution 4.0 License](https://creativecommons.org/licenses/by/4.0/legalcode)
