@@ -227,7 +227,7 @@ impl<C: Coder> DBConnection<C> {
         }
     }
 
-    /// Returns the version of the crate this table was created with
+    /// Returns the version of the crate this DB was created with
     #[inline(always)]
     pub fn get_version(&self) -> Result<String, String> {
 

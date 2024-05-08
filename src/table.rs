@@ -92,7 +92,7 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
 
         if version != env!("CARGO_PKG_VERSION") {
             panic!(
-                "Table was created with incompatible version of {} - {}",
+                "DB was created with incompatible version of {} - {}",
                 env!("CARGO_CRATE_NAME"),
                 env!("CARGO_PKG_VERSION")
             )
