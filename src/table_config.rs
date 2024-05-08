@@ -9,7 +9,7 @@ use core::cmp::min;
 use std::mem::MaybeUninit;
 
 use num_traits::Zero;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// The maximum number of characters allowable in a key.  Longer keys will cause an error
 pub const MAX_KEY_LENGTH : usize = 95;
@@ -207,6 +207,19 @@ pub trait TableConfig {
 
         Self::DistanceT::from(unsafe{ d[m-1][n-1].assume_init() })
     }
+
+    fn metadata() -> TableMetadata {
+        TableMetadata {
+            key_char_type: std::any::type_name::<Self::KeyCharT>().into(),
+            distance_type: std::any::type_name::<Self::DistanceT>().into(),
+            value_type: std::any::type_name::<Self::ValueT>().into(),
+            coder_type: std::any::type_name::<Self::CoderT>().into(),
+            utf8_keys: Self::UTF8_KEYS,
+            max_deletes: Self::MAX_DELETES,
+            meaningful_key_len: Self::MEANINGFUL_KEY_LEN,
+            group_variant_overlap_threshold: Self::GROUP_VARIANT_OVERLAP_THRESHOLD,
+        }
+    }
 }
 
 /// A type for a function to compute the distance between two keys. Used in a [TableConfig]
@@ -251,6 +264,18 @@ pub trait TableConfig {
 /// Once the distance function has been evaluated, its return value is considered the authoritative distance
 /// between the two keys, and the delete distance is irrelevant from that point onwards.
 pub type DistanceFunction<KeyCharT, DistanceT> = fn(key_a : &[KeyCharT], key_b : &[KeyCharT]) -> DistanceT;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableMetadata {
+    pub key_char_type: String,
+    pub distance_type: String,
+    pub value_type: String,
+    pub coder_type: String,
+    pub utf8_keys: bool,
+    pub max_deletes: usize,
+    pub meaningful_key_len: usize,
+    pub group_variant_overlap_threshold: usize
+}
 
 /// A struct that implements [TableConfig] with default values.  This can be passed as a convenience
 /// when a default configuration for [Table](crate::Table) is acceptable

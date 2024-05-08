@@ -10,6 +10,8 @@ use serde::Serialize;
 
 use rocksdb::{DB, DBWithThreadMode, ColumnFamily, ColumnFamilyDescriptor, MergeOperands};
 
+use crate::table_config::TableMetadata;
+use crate::TableConfig;
 #[cfg(feature = "bitcode")]
 use crate::CONST_CODER;
 
@@ -242,11 +244,35 @@ impl<C: Coder> DBConnection<C> {
         }
     }
 
-    /// Puts current crate version into version table
+    /// Puts current crate version into metadata table
     pub fn put_version(&mut self) -> Result<(), String> {
         let value_cf_handle = self.db.cf_handle(METADATA_CF_NAME).unwrap();
         let value_bytes = self.coder.encode_fmt1_to_buf(&env!("CARGO_PKG_VERSION").to_owned()).unwrap();
         self.db.put_cf(value_cf_handle, [], value_bytes)?;
+
+        Ok(())
+    }
+
+    /// Returns the table config this DB was created with
+    #[inline(always)]
+    pub fn get_config(&self) -> Result<TableMetadata, String> {
+
+        //Get the value object by deserializing the bytes from the db
+        let version_cf_handle = self.db.cf_handle(METADATA_CF_NAME).unwrap();
+        if let Some(value_bytes) = self.db.get_pinned_cf(version_cf_handle, [1])? {
+            let value = self.coder.decode_fmt1_from_bytes(&value_bytes).unwrap();
+            Ok(value)
+        } else {
+            Err("No version record found".to_string())
+        }
+    }
+
+    /// Puts current DB config into metadata table
+    pub fn put_config<ConfigT : TableConfig>(&mut self) -> Result<(), String> {
+        let value_cf_handle = self.db.cf_handle(METADATA_CF_NAME).unwrap();
+        let config = ConfigT::metadata();
+        let value_bytes = self.coder.encode_fmt1_to_buf(&config).unwrap();
+        self.db.put_cf(value_cf_handle, [1], value_bytes)?;
 
         Ok(())
     }

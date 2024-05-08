@@ -87,7 +87,7 @@ impl TableConfig for Config {
 }
 
 //Create and reset the FuzzyRocks Table
-let mut table = Table::<Config, false>::new("test.rocks", Config()).unwrap();
+let mut table = Table::<Config, false>::new("test_custom_config.rocks", Config()).unwrap();
 ```
 
 Additional usage examples can be found in the tests, located at the bottom of the [src/lib.rs](https://github.com/luketpeterson/fuzzy_rocks/blob/main/src/lib.rs) file.

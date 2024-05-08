@@ -92,10 +92,21 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
 
         if version != env!("CARGO_PKG_VERSION") {
             panic!(
-                "DB was created with incompatible version of {} - {}",
-                env!("CARGO_CRATE_NAME"),
-                env!("CARGO_PKG_VERSION")
+                "DB was created with incompatible version of {} - {version}",
+                env!("CARGO_CRATE_NAME")
             )
+        }
+
+        let stored_config = match db.get_config() {
+            Ok(c) => c,
+            Err(_) => {
+                db.put_config::<ConfigT>()?;
+                ConfigT::metadata()
+            }
+        };
+
+        if stored_config != ConfigT::metadata() {
+            panic!("DB was created with a different configuration: {stored_config:?}")
         }
 
         //Find the next value for new RecordIDs, by probing the entries in the "rec_data" column family
@@ -109,10 +120,6 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
             deleted_records : vec![],
             perf_counters : PerfCounters::new(),
         })
-    }
-
-    pub fn get_version(&self) -> Result<String, String> {
-        self.db.get_version()
     }
 
     /// Resets a Table, dropping every record in the table and restoring it to an empty state.
