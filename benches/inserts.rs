@@ -17,11 +17,11 @@ pub fn insert_benchmark(c: &mut Criterion) {
     }
     let mut table = Table::<Config, true>::new("bench_insert.geonames.rocks", Config()).unwrap();
 
+    //Clear out any records that happen to be hanging out from the last run
+    table.reset().unwrap();
+
     let mut geonames_file_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     geonames_file_path.push("geonames_megacities.txt");
-
-    //Clear out any records that happen to be hanging out
-    table.reset().unwrap();
 
     //Data structure to parse the GeoNames TSV file into
     #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -68,35 +68,47 @@ pub fn insert_benchmark(c: &mut Criterion) {
         .double_quote(false)
         .from_reader(tsv_file_contents.as_bytes());
 
-    //Iterate over every geoname entry in the geonames file and insert it (lowercase) into our table
-    let geo_names = tsv_parser
+    //Iterate over every geoname entry in the geonames file and collect together all the (lowercase) names keys
+    let name_sets = tsv_parser
         .deserialize::<GeoName>()
         .map(|result| result.unwrap())
+        .map(|geoname| {
+            //Separate the comma-separated alternatenames field
+            let mut names: HashSet<String> = HashSet::from_iter(
+                geoname
+                    .alternatenames
+                    .split(',')
+                    .map(|string| string.to_lowercase()),
+            );
+            //Add the primary name for the place
+            names.insert(geoname.name.to_lowercase());
+
+            //Make the vec of names that we'll use as keys in the table
+            let names_vec: Vec<String> = names
+                .into_iter()
+                .map(|string| unicode_truncate(string.as_str(), MAX_KEY_LENGTH))
+                .collect();
+            (names_vec, geoname.geonameid)
+        })
         .collect::<Vec<_>>();
 
-    c.bench_function("insert", move |b| {
+    let mut name_sets_iter = name_sets.iter();
+
+    c.bench_function("insert", |b| {
         b.iter(|| {
             black_box({
-                for geoname in &geo_names {
-                    //Separate the comma-separated alternatenames field
-                    let mut names: HashSet<String> = HashSet::from_iter(
-                        geoname
-                            .alternatenames
-                            .split(',')
-                            .map(|string| string.to_lowercase()),
-                    );
 
-                    //Add the primary name for the place
-                    names.insert(geoname.name.to_lowercase());
+                //Get the next city, or start over if we've gone through all of them
+                let name_set = match name_sets_iter.next() {
+                    Some(name_set) => name_set,
+                    None => {
+                        println!("WARNING: insert benchmark is reusing cities.  Consider increasing the size of the input dataset");
+                        name_sets_iter = name_sets.iter();
+                        name_sets_iter.next().unwrap()
+                    }
+                };
 
-                    //Create a record in the table
-                    let names_vec: Vec<String> = names
-                        .into_iter()
-                        .map(|string| unicode_truncate(string.as_str(), MAX_KEY_LENGTH))
-                        .collect();
-                    table.create(&names_vec[..], &geoname.geonameid).unwrap();
-                }
-                1
+                table.create(&name_set.0[..], &name_set.1).unwrap();
             })
         })
     });
