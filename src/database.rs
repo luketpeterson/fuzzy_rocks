@@ -23,7 +23,7 @@ use super::perf_counters::{*};
 pub const KEYS_CF_NAME : &str = "keys";
 pub const RECORD_DATA_CF_NAME : &str = "rec_data";
 pub const VALUES_CF_NAME : &str = "values";
-pub const VERSION_CF_NAME : &str = "version";
+pub const METADATA_CF_NAME : &str = "metadata";
 pub const VARIANTS_CF_NAME : &str = "variants";
 
 /// Encapsulates a connection to a database
@@ -41,7 +41,7 @@ impl<C: Coder> DBConnection<C> {
         let keys_cf = ColumnFamilyDescriptor::new(KEYS_CF_NAME, rocksdb::Options::default());
         let rec_data_cf = ColumnFamilyDescriptor::new(RECORD_DATA_CF_NAME, rocksdb::Options::default());
         let values_cf = ColumnFamilyDescriptor::new(VALUES_CF_NAME, rocksdb::Options::default());
-        let version_cf = ColumnFamilyDescriptor::new(VERSION_CF_NAME, rocksdb::Options::default());
+        let version_cf = ColumnFamilyDescriptor::new(METADATA_CF_NAME, rocksdb::Options::default());
 
         //Configure the "variants" column family
         let mut variants_opts = rocksdb::Options::default();
@@ -232,7 +232,7 @@ impl<C: Coder> DBConnection<C> {
     pub fn get_version(&self) -> Result<String, String> {
 
         //Get the value object by deserializing the bytes from the db
-        let version_cf_handle = self.db.cf_handle(VERSION_CF_NAME).unwrap();
+        let version_cf_handle = self.db.cf_handle(METADATA_CF_NAME).unwrap();
         if let Some(value_bytes) = self.db.get_pinned_cf(version_cf_handle, [])? {
             let value : String = self.coder.decode_fmt1_from_bytes(&value_bytes).unwrap();
 
@@ -244,7 +244,7 @@ impl<C: Coder> DBConnection<C> {
 
     /// Puts current crate version into version table
     pub fn put_version(&mut self) -> Result<(), String> {
-        let value_cf_handle = self.db.cf_handle(VERSION_CF_NAME).unwrap();
+        let value_cf_handle = self.db.cf_handle(METADATA_CF_NAME).unwrap();
         let value_bytes = self.coder.encode_fmt1_to_buf(&env!("CARGO_PKG_VERSION").to_owned()).unwrap();
         self.db.put_cf(value_cf_handle, [], value_bytes)?;
 
