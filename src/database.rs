@@ -10,6 +10,9 @@ use serde::Serialize;
 
 use rocksdb::{DB, DBWithThreadMode, ColumnFamily, ColumnFamilyDescriptor, MergeOperands};
 
+#[cfg(feature = "bitcode")]
+use crate::CONST_CODER;
+
 use super::encode_decode::Coder;
 
 use super::records::{*};
@@ -211,7 +214,10 @@ impl<C: Coder> DBConnection<C> {
         //Get the value object by deserializing the bytes from the db
         let values_cf_handle = self.db.cf_handle(VALUES_CF_NAME).unwrap();
         if let Some(value_bytes) = self.db.get_pinned_cf(values_cf_handle, record_id.to_le_bytes())? {
+            #[cfg(not(feature = "bitcode"))]
             let value : ValueT = self.coder.decode_fmt1_from_bytes(&value_bytes).unwrap();
+            #[cfg(feature = "bitcode")]
+            let value : ValueT = CONST_CODER.decode_fmt1_from_bytes(&value_bytes).unwrap();
 
             Ok(value)
         } else {
@@ -239,7 +245,10 @@ impl<C: Coder> DBConnection<C> {
 
         //Serialize the value and put it in the values table.
         let value_cf_handle = self.db.cf_handle(VALUES_CF_NAME).unwrap();
+        #[cfg(not(feature = "bitcode"))]
         let value_bytes = self.coder.encode_fmt1_to_buf(value).unwrap();
+        #[cfg(feature = "bitcode")]
+        let value_bytes = CONST_CODER.encode_fmt1_to_buf(value).unwrap();
         self.db.put_cf(value_cf_handle, record_id.to_le_bytes(), value_bytes)?;
 
         Ok(())

@@ -41,6 +41,8 @@ pub type DefaultCoder = BincodeCoder;
 
 #[cfg(all(feature = "bitcode", not(feature = "msgpack"), not(feature = "bincode")))]
 pub type DefaultCoder = BitcodeCoder;
+#[cfg(feature = "bitcode")]
+pub const CONST_CODER: BitcodeCoder = BitcodeCoder;
 
 #[cfg(test)]
 mod tests {
