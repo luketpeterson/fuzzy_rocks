@@ -80,7 +80,23 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
         }
 
         //Open the Database
-        let db = DBConnection::new(ConfigT::CoderT::new(), path)?;
+        let mut db = DBConnection::new(ConfigT::CoderT::new(), path)?;
+
+        let version = match db.get_version() {
+            Ok(v) => v,
+            Err(_) => {
+              db.put_version()?;
+              env!("CARGO_PKG_VERSION").to_owned()
+            },
+        };
+
+        if version != env!("CARGO_PKG_VERSION") {
+            panic!(
+                "Table was created with incompatible version of {} - {}",
+                env!("CARGO_CRATE_NAME"),
+                env!("CARGO_PKG_VERSION")
+            )
+        }
 
         //Find the next value for new RecordIDs, by probing the entries in the "rec_data" column family
         let record_count = db.record_count()?;
@@ -93,6 +109,10 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
             deleted_records : vec![],
             perf_counters : PerfCounters::new(),
         })
+    }
+
+    pub fn get_version(&self) -> Result<String, String> {
+        self.db.get_version()
     }
 
     /// Resets a Table, dropping every record in the table and restoring it to an empty state.

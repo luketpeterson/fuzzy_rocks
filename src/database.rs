@@ -23,6 +23,7 @@ use super::perf_counters::{*};
 pub const KEYS_CF_NAME : &str = "keys";
 pub const RECORD_DATA_CF_NAME : &str = "rec_data";
 pub const VALUES_CF_NAME : &str = "values";
+pub const VERSION_CF_NAME : &str = "version";
 pub const VARIANTS_CF_NAME : &str = "variants";
 
 /// Encapsulates a connection to a database
@@ -40,6 +41,7 @@ impl<C: Coder> DBConnection<C> {
         let keys_cf = ColumnFamilyDescriptor::new(KEYS_CF_NAME, rocksdb::Options::default());
         let rec_data_cf = ColumnFamilyDescriptor::new(RECORD_DATA_CF_NAME, rocksdb::Options::default());
         let values_cf = ColumnFamilyDescriptor::new(VALUES_CF_NAME, rocksdb::Options::default());
+        let version_cf = ColumnFamilyDescriptor::new(VERSION_CF_NAME, rocksdb::Options::default());
 
         //Configure the "variants" column family
         let mut variants_opts = rocksdb::Options::default();
@@ -57,7 +59,7 @@ impl<C: Coder> DBConnection<C> {
         db_opts.create_if_missing(true);
 
         //Open the database
-        let db = DB::open_cf_descriptors(&db_opts, path, vec![keys_cf, rec_data_cf, values_cf, variants_cf])?;
+        let db = DB::open_cf_descriptors(&db_opts, path, vec![keys_cf, rec_data_cf, values_cf, variants_cf, version_cf])?;
 
         Ok(Self{
             db,
@@ -223,6 +225,30 @@ impl<C: Coder> DBConnection<C> {
         } else {
             Err("Invalid record_id".to_string())
         }
+    }
+
+    /// Returns the version of the crate this table was created with
+    #[inline(always)]
+    pub fn get_version(&self) -> Result<String, String> {
+
+        //Get the value object by deserializing the bytes from the db
+        let version_cf_handle = self.db.cf_handle(VERSION_CF_NAME).unwrap();
+        if let Some(value_bytes) = self.db.get_pinned_cf(version_cf_handle, [])? {
+            let value : String = self.coder.decode_fmt1_from_bytes(&value_bytes).unwrap();
+
+            Ok(value)
+        } else {
+            Err("No version record found".to_string())
+        }
+    }
+
+    /// Puts current crate version into version table
+    pub fn put_version(&mut self) -> Result<(), String> {
+        let value_cf_handle = self.db.cf_handle(VERSION_CF_NAME).unwrap();
+        let value_bytes = self.coder.encode_fmt1_to_buf(&env!("CARGO_PKG_VERSION").to_owned()).unwrap();
+        self.db.put_cf(value_cf_handle, [], value_bytes)?;
+
+        Ok(())
     }
 
     /// Deletes a record's value in the values table
