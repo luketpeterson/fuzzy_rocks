@@ -64,11 +64,7 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
     {
 
     /// Creates a new Table, backed by the database at the path provided
-    /// 
-    /// WARNING:  No sanity checks are performed to ensure the database being opened matches the parameters
-    /// of the table being created.  Therefore you may see bugs if you are opening a table that was created
-    /// using a different set of parameters.
-    /// 
+    ///
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn new(path : &str, config : ConfigT) -> Result<Self, String> {
@@ -82,19 +78,19 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
         //Open the Database
         let mut db = DBConnection::new(ConfigT::CoderT::new(), path)?;
 
-        let version = match db.get_version() {
-            Ok(v) => v,
-            Err(_) => {
-              db.put_version()?;
-              env!("CARGO_PKG_VERSION").to_owned()
+        //Get the version from the DB, so we don't try and work with an incompatible database
+        let version = match db.table_is_empty()? {
+            true => {
+                db.put_version()?;
+                env!("CARGO_PKG_VERSION").to_owned()
             },
+            false => {
+                db.get_version()?
+            }
         };
 
         if version != env!("CARGO_PKG_VERSION") {
-            panic!(
-                "DB was created with incompatible version of {} - {version}",
-                env!("CARGO_CRATE_NAME")
-            )
+            return Err(format!("DB was created with incompatible version of fuzzy_rocks. DB-version = {version}"))
         }
 
         let stored_config = match db.get_config() {
@@ -106,7 +102,7 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
         };
 
         if stored_config != ConfigT::metadata() {
-            panic!("DB was created with a different configuration: {stored_config:?}")
+            return Err(format!("DB was created with a different configuration: {stored_config:?}"));
         }
 
         //Find the next value for new RecordIDs, by probing the entries in the "rec_data" column family

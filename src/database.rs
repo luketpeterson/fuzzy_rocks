@@ -108,6 +108,12 @@ impl<C: Coder> DBConnection<C> {
         Ok(record_count)
     }
 
+    /// Returns `true` if the table associated with the DBConnection has no entries.  Otherwise `false`
+    pub fn table_is_empty(&self) -> Result<bool, String> {
+        let rec_data_cf_handle = self.db.cf_handle(RECORD_DATA_CF_NAME).unwrap();
+        Ok(self.db.get_pinned_cf(rec_data_cf_handle, RecordID(0).to_le_bytes())?.is_none())
+    }
+
     /// Returns an iterator for every key group associated with a specified record
     ///
     /// Internal FuzzyRocks interface, but exported outside the key_groups module
@@ -230,31 +236,28 @@ impl<C: Coder> DBConnection<C> {
     }
 
     /// Returns the version of the crate this DB was created with
-    #[inline(always)]
     pub fn get_version(&self) -> Result<String, String> {
 
         //Get the value object by deserializing the bytes from the db
         let version_cf_handle = self.db.cf_handle(METADATA_CF_NAME).unwrap();
         if let Some(value_bytes) = self.db.get_pinned_cf(version_cf_handle, [])? {
-            let value : String = self.coder.decode_fmt1_from_bytes(&value_bytes).unwrap();
-
+            let value = String::from_utf8(value_bytes.to_owned()).unwrap();
             Ok(value)
         } else {
-            Err("No version record found".to_string())
+            Err("Error: No config metadata found for table.  The table was likely built with an old version of fuzzy_rocks".to_string())
         }
     }
 
     /// Puts current crate version into metadata table
     pub fn put_version(&mut self) -> Result<(), String> {
         let value_cf_handle = self.db.cf_handle(METADATA_CF_NAME).unwrap();
-        let value_bytes = self.coder.encode_fmt1_to_buf(&env!("CARGO_PKG_VERSION").to_owned()).unwrap();
+        let value_bytes = env!("CARGO_PKG_VERSION").as_bytes();
         self.db.put_cf(value_cf_handle, [], value_bytes)?;
 
         Ok(())
     }
 
     /// Returns the table config this DB was created with
-    #[inline(always)]
     pub fn get_config(&self) -> Result<TableMetadata, String> {
 
         //Get the value object by deserializing the bytes from the db
@@ -263,7 +266,7 @@ impl<C: Coder> DBConnection<C> {
             let value = self.coder.decode_fmt1_from_bytes(&value_bytes).unwrap();
             Ok(value)
         } else {
-            Err("No version record found".to_string())
+            Err("Error: No config metadata found for table.  The table was likely built with an old version of fuzzy_rocks".to_string())
         }
     }
 
@@ -488,7 +491,7 @@ fn probe_for_max_sequential_key(db : &DBWithThreadMode<rocksdb::SingleThreaded>,
 
             if max == min {
                 return Ok(cur_val)
-            }    
+            }
         }
 
         cur_val = ((guess_max - min) / 2) + min;
