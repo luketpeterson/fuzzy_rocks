@@ -79,7 +79,7 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
         let mut db = DBConnection::new(ConfigT::CoderT::new(), path)?;
 
         //Get the version from the DB, so we don't try and work with an incompatible database
-        let version = match db.table_is_empty()? {
+        let version_string = match db.table_is_empty()? {
             true => {
                 db.put_version()?;
                 db.put_config::<ConfigT>()?;
@@ -89,9 +89,16 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
                 db.get_version()?
             }
         };
+        let db_version = semver::Version::parse(&version_string).map_err(|e| e.to_string())?;
+        let running_version = semver::Version::parse(&env!("CARGO_PKG_VERSION")).unwrap();
 
-        if version != env!("CARGO_PKG_VERSION") {
-            return Err(format!("DB was created with incompatible version of fuzzy_rocks. DB-version = {version}"))
+        //The DB version must be built with the same major & minor version, and a patch version
+        // that is the same or older.
+        //NOTE: This behavior will change if we declare 1.0
+        if db_version.major != running_version.major ||
+            db_version.minor != running_version.minor ||
+            db_version.patch > running_version.patch {
+            return Err(format!("DB was created with incompatible version of fuzzy_rocks. DB-version = {db_version}"))
         }
 
         let stored_config = db.get_config()?;

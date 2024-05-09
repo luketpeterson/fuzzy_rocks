@@ -13,6 +13,7 @@ keywords = ["rocksdb", "fuzzy", "search", "fuzzy-search", "symspell"]
 num-traits = "0.2.14"
 derive_more = "0.99.14"
 rocksdb = ">=0.18.0, <=0.21.0"
+semver = "1.0.23"
 serde = { version = "1.0.126", features = ["derive"] }
 
 rmp-serde = { version = "1.1.2", optional = true }
