@@ -271,9 +271,13 @@ Depending on the [Coder] used, DB contents are encoded using either [BitCode](ht
 
 ## Release History
 
+### 0.4.0
+- Added [Bitcode](https://github.com/SoftbearStudios/bitcode) coder format and making it the default.
+- Safety checks against opening a database with an incompatible format
+
 ### 0.3.0
 - Abstract encode/decode format in database
-- Adding [MessagePack](https://msgpack.org/index.html) format, although [Bincode](https://docs.rs/crate/bincode/latest) remains the default
+- Added [MessagePack](https://msgpack.org/index.html) format, although [Bincode](https://docs.rs/crate/bincode/latest) remains the default
 
 ### 0.2.2
 - Fix for logic bug that would cause some results to be missed
