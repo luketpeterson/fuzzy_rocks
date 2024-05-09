@@ -16,6 +16,9 @@ pub trait Coder: Clone + Send + Sync + 'static {
     /// Create a new coder
     fn new() -> Self;
 
+    /// The name of the format, to check for compatibility
+    fn format_name(&self) -> &'static str;
+
     /// Encodes an arbitrary structure to bytes using fmt1 encoding
     fn encode_fmt1_to_buf<T: serde::ser::Serialize>(&self, obj: &T) -> Result<Vec<u8>, String>;
 
@@ -53,6 +56,26 @@ pub trait Coder: Clone + Send + Sync + 'static {
 
 }
 
+#[cfg(feature = "bitcode")]
+macro_rules! internal_coder {
+    () => { crate::BitcodeCoder };
+}
+
+#[cfg(all(feature = "bincode", not(feature = "bitcode")))]
+pub(crate) static INTERNAL_CODER: std::sync::OnceLock<crate::BincodeCoder> = std::sync::OnceLock::new();
+
+#[cfg(all(feature = "bincode", not(feature = "bitcode")))]
+macro_rules! internal_coder {
+    () => { crate::encode_decode::INTERNAL_CODER.get_or_init(|| crate::BincodeCoder::new()) };
+}
+
+#[cfg(all(feature = "msgpack", not(feature = "bitcode"), not(feature = "bincode")))]
+macro_rules! internal_coder {
+    () => { crate::MsgPackCoder };
+}
+
+pub(crate) use internal_coder;
+
 #[cfg(feature = "bincode")]
 pub(crate) mod bincode_interface {
     use super::*;
@@ -73,6 +96,9 @@ pub(crate) mod bincode_interface {
                 varint_coder: bincode::DefaultOptions::new().with_varint_encoding().with_little_endian(),
                 fixint_coder: bincode::DefaultOptions::new().with_fixint_encoding().with_little_endian(),
             }
+        }
+        fn format_name(&self) -> &'static str {
+            "bincode"
         }
         fn encode_fmt1_to_buf<T: serde::ser::Serialize>(&self, obj: &T) -> Result<Vec<u8>, String> {
             self.varint_coder.serialize(obj).map_err(|e| format!("Encode error: {e}"))
@@ -116,6 +142,9 @@ pub(crate) mod msgpack_interface {
         fn new() -> Self {
             Self
         }
+        fn format_name(&self) -> &'static str {
+            "msgpack"
+        }
         fn encode_fmt1_to_buf<T: serde::ser::Serialize>(&self, obj: &T) -> Result<Vec<u8>, String> {
             rmp_serde::encode::to_vec(obj).map_err(|e| format!("Encode error: {e}"))
         }
@@ -154,6 +183,9 @@ pub(crate) mod bitcode_interface {
     impl Coder for BitcodeCoder {
         fn new() -> Self {
             Self
+        }
+        fn format_name(&self) -> &'static str {
+            "bitcode v.0.6.0"
         }
         fn encode_fmt1_to_buf<T: serde::ser::Serialize>(&self, obj: &T) -> Result<Vec<u8>, String> {
             bitcode::serialize(obj).map_err(|e| format!("Encode error: {e}"))
@@ -235,7 +267,7 @@ mod tests {
     let data = coder.encode_fmt1_to_buf::<String>(&"test".to_string()).unwrap();
 
     let len = coder.fmt1_list_len(&data).unwrap();
-    
+
     assert_eq!(len , 4);
   }
 }

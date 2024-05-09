@@ -11,6 +11,8 @@ use std::mem::MaybeUninit;
 use num_traits::Zero;
 use serde::{Deserialize, Serialize};
 
+use crate::encode_decode::{Coder, internal_coder};
+
 /// The maximum number of characters allowable in a key.  Longer keys will cause an error
 pub const MAX_KEY_LENGTH : usize = 95;
 
@@ -73,8 +75,9 @@ pub trait TableConfig {
     /// be able to be serialized and deserialized from the database but otherwise is not constrained.
     type ValueT : 'static + Serialize + serde::de::DeserializeOwned;
 
-    /// The [Coder] interface to use to encode and decode the objects in the database.  Currently this should be either [BincodeCoder](crate::BincodeCoder)
-    /// or [MsgPackCoder](crate::MsgPackCoder).  Alternatively, use [DefaultCoder](crate::DefaultCoder) for the coder selected by the crate features
+    /// The [Coder] interface to use to encode and decode the objects in the database.  Currently this should be either [BitcodeCoder](crate::BitcodeCoder),
+    /// [BincodeCoder](crate::BincodeCoder), or [MsgPackCoder](crate::MsgPackCoder).  Alternatively, use [DefaultCoder](crate::DefaultCoder) for the coder
+    /// selected by the crate features
     type CoderT : 'static + crate::Coder + Send + Sync;
 
     /// A `const bool` that specifies whether the keys are [UTF-8](https://en.wikipedia.org/wiki/UTF-8) encoded [Unicode](https://en.wikipedia.org/wiki/Unicode) strings or not. 
@@ -209,11 +212,14 @@ pub trait TableConfig {
     }
 
     fn metadata() -> TableMetadata {
+        let temp_coder = Self::CoderT::new();
+
         TableMetadata {
             key_char_type: std::any::type_name::<Self::KeyCharT>().into(),
             distance_type: std::any::type_name::<Self::DistanceT>().into(),
             value_type: std::any::type_name::<Self::ValueT>().into(),
-            coder_type: std::any::type_name::<Self::CoderT>().into(),
+            value_coder_name: temp_coder.format_name().to_string(),
+            internal_coder_name: internal_coder!().format_name().to_string(),
             utf8_keys: Self::UTF8_KEYS,
             max_deletes: Self::MAX_DELETES,
             meaningful_key_len: Self::MEANINGFUL_KEY_LEN,
@@ -270,11 +276,12 @@ pub struct TableMetadata {
     pub key_char_type: String,
     pub distance_type: String,
     pub value_type: String,
-    pub coder_type: String,
+    pub value_coder_name: String,
+    pub internal_coder_name: String,
     pub utf8_keys: bool,
     pub max_deletes: usize,
     pub meaningful_key_len: usize,
-    pub group_variant_overlap_threshold: usize
+    pub group_variant_overlap_threshold: usize,
 }
 
 /// A struct that implements [TableConfig] with default values.  This can be passed as a convenience

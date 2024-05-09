@@ -182,7 +182,7 @@ cargo bench -- --nocapture
 
 ## Database Format
 
-Depending on the [Coder] used, DB contents are encoded using either [Bincode](https://docs.rs/crate/bincode/latest) crate or [MessagePack](https://msgpack.org/index.html).  Currently the database contains 4 Column Families.
+Depending on the [Coder] used, DB contents are encoded using either [BitCode](https://github.com/SoftbearStudios/bitcode), [Bincode](https://docs.rs/crate/bincode/latest), or [MessagePack](https://msgpack.org/index.html).  Currently the database contains 5 Column Families.
 
 1. The "rec_data" CF uses a little-endian-encoded [RecordID] as its key, and stores a varint-encoded `Vec` of integers, which represent key_group indices, each of which can be combined with a `RecordID` to create a `KeyGroupID`.  Each referenced key_group contains at least one key associated with the record. The `rec_data` CF is the place to start when constructing the complete set of keys associated with a record.
 
@@ -191,6 +191,8 @@ Depending on the [Coder] used, DB contents are encoded using either [Bincode](ht
 3. The "variants" CF uses a serialized key variant as its key, and stores a fixint-encoded `Vec` of `KeyGroupID`s representing every key_group that holds a key that can be reduced to this variant. Complete key strings themselves are represented as variants in this CF.
 
 4. The "values" CF uses a little-endian-encoded [RecordID] as its key, and stores the [ValueT](TableConfig::ValueT) associated with the record.
+
+5. The "metadata" CF stores information about the crate version and TableConfig so that a Table DB created by an incompatible version is not opened and/or corrupted.
 
 ## Future Work
 
@@ -251,11 +253,7 @@ Depending on the [Coder] used, DB contents are encoded using either [Bincode](ht
     way to return a deterministic result set is to return more than k results. (or fewer than k, but that may
     mean a set with no results, which is probably not what the caller wants.)
 
-5. Save the TableConfig to the database, in order to detect an error when the config changes in a way that makes
-    the database invalid.  Also include a software version check, and create a function to represent which
-    software versions contain database format compatibility breaks.  Open Question: Should we store a checksum
-    of the distance function?  The function may be re-compiled or changed internally without changing behavior,
-    but we can't know that.
+5. ~~Save the TableConfig to the database, in order to detect an error when the config changes in a way that makes the database invalid.  Also include a software version check, and create a function to represent which software versions contain database format compatibility breaks.~~  Open Question: Should we store a checksum of the distance function?  The function may be re-compiled or changed internally without changing behavior, but we can't know that.
 
 6. Remove the `KeyUnsafe` trait as soon as "GenericAssociatedTypes" is stabilized in Rust.  
     <https://github.com/rust-lang/rust/issues/44265>.  As soon as I can implement an associated type with an

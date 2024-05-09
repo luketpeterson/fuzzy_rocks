@@ -12,8 +12,7 @@ use rocksdb::{DB, DBWithThreadMode, ColumnFamily, ColumnFamilyDescriptor, MergeO
 
 use crate::table_config::TableMetadata;
 use crate::TableConfig;
-#[cfg(feature = "bitcode")]
-use crate::CONST_CODER;
+use crate::encode_decode::internal_coder;
 
 use super::encode_decode::Coder;
 
@@ -32,12 +31,12 @@ pub const VARIANTS_CF_NAME : &str = "variants";
 pub struct DBConnection<C: Coder + Send + Sync> {
     db : DBWithThreadMode<rocksdb::SingleThreaded>,
     path : String,
-    coder: C,
+    value_coder: C,
 }
 
 impl<C: Coder> DBConnection<C> {
 
-    pub fn new(coder: C, path : &str) -> Result<Self, String> {
+    pub fn new(value_coder: C, path : &str) -> Result<Self, String> {
 
         //Configure the "keys" and "values" column families
         let keys_cf = ColumnFamilyDescriptor::new(KEYS_CF_NAME, rocksdb::Options::default());
@@ -48,10 +47,9 @@ impl<C: Coder> DBConnection<C> {
         //Configure the "variants" column family
         let mut variants_opts = rocksdb::Options::default();
         variants_opts.create_if_missing(true);
-        let coder_clone = coder.clone();
         variants_opts.set_merge_operator_associative("append to RecordID vec",
             move |key: &[u8], existing_val: Option<&[u8]>, operands: &MergeOperands| -> Option<Vec<u8>> {
-                variant_append_merge(&coder_clone, key, existing_val, operands)
+                variant_append_merge(key, existing_val, operands)
         });
         let variants_cf = ColumnFamilyDescriptor::new(VARIANTS_CF_NAME, variants_opts);
 
@@ -66,7 +64,7 @@ impl<C: Coder> DBConnection<C> {
         Ok(Self{
             db,
             path : path.to_string(),
-            coder
+            value_coder
         })
     }
 
@@ -87,10 +85,9 @@ impl<C: Coder> DBConnection<C> {
         //Recreate the "variants" column family
         let mut variants_opts = rocksdb::Options::default();
         variants_opts.create_if_missing(true);
-        let coder_clone = self.coder.clone();
         variants_opts.set_merge_operator_associative("append to RecordID vec",
             move |key: &[u8], existing_val: Option<&[u8]>, operands: &MergeOperands| -> Option<Vec<u8>> {
-                variant_append_merge(&coder_clone, key, existing_val, operands)
+                variant_append_merge(key, existing_val, operands)
         });
         self.db.create_cf(VARIANTS_CF_NAME, &variants_opts)?;
 
@@ -122,7 +119,7 @@ impl<C: Coder> DBConnection<C> {
 
         let rec_data_cf_handle = self.db.cf_handle(RECORD_DATA_CF_NAME).unwrap();
         if let Some(rec_data_vec_bytes) = self.db.get_pinned_cf(rec_data_cf_handle, record_id.to_le_bytes())? {
-            let rec_data : RecordData = self.coder.decode_fmt1_from_bytes(&rec_data_vec_bytes).unwrap();
+            let rec_data : RecordData = internal_coder!().decode_fmt1_from_bytes(&rec_data_vec_bytes).unwrap();
 
             if !rec_data.key_groups.is_empty() {
                 Ok(rec_data.key_groups.into_iter().map(move |group_idx| KeyGroupID::from_record_and_idx(record_id, group_idx)))
@@ -142,7 +139,7 @@ impl<C: Coder> DBConnection<C> {
         //Create the RecordData, serialize it, and put in into the rec_data table.
         let rec_data_cf_handle = self.db.cf_handle(RECORD_DATA_CF_NAME).unwrap();
         let new_rec_data = RecordData::new(key_groups_vec);
-        let rec_data_bytes = self.coder.encode_fmt1_to_buf(&new_rec_data).unwrap();
+        let rec_data_bytes = internal_coder!().encode_fmt1_to_buf(&new_rec_data).unwrap();
         self.db.put_cf(rec_data_cf_handle, record_id.to_le_bytes(), rec_data_bytes)?;
 
         Ok(())
@@ -156,7 +153,7 @@ impl<C: Coder> DBConnection<C> {
         //Get the keys vec by deserializing the bytes from the db
         let keys_cf_handle = self.db.cf_handle(KEYS_CF_NAME).unwrap();
         if let Some(keys_vec_bytes) = self.db.get_pinned_cf(keys_cf_handle, key_group.to_le_bytes())? {
-            let keys_vec : Vec<OwnedKeyT> = self.coder.decode_fmt1_from_bytes(&keys_vec_bytes).unwrap();
+            let keys_vec : Vec<OwnedKeyT> = internal_coder!().decode_fmt1_from_bytes(&keys_vec_bytes).unwrap();
 
             #[cfg(feature = "perf_counters")]
             {
@@ -186,7 +183,7 @@ impl<C: Coder> DBConnection<C> {
 
         let keys_cf_handle = self.db.cf_handle(KEYS_CF_NAME).unwrap();
         if let Some(keys_vec_bytes) = self.db.get_pinned_cf(keys_cf_handle, key_group.to_le_bytes())? {
-            Ok(self.coder.fmt1_list_len(&keys_vec_bytes).unwrap())
+            Ok(internal_coder!().fmt1_list_len(&keys_vec_bytes).unwrap())
         } else {
             panic!(); //If we hit this, we have a corrupt DB
         }
@@ -198,7 +195,7 @@ impl<C: Coder> DBConnection<C> {
     pub fn put_key_group_entry<K : Eq + Hash + Serialize>(&mut self, key_group_id : KeyGroupID, raw_keys : &HashSet<K>) -> Result<(), String> {
 
         //Serialize the keys into a vec of bytes
-        let keys_bytes = self.coder.encode_fmt1_list_to_buf(&raw_keys).unwrap();
+        let keys_bytes = internal_coder!().encode_fmt1_list_to_buf(&raw_keys).unwrap();
 
         //Put the vector of keys into the keys table
         let keys_cf_handle = self.db.cf_handle(KEYS_CF_NAME).unwrap();
@@ -224,15 +221,37 @@ impl<C: Coder> DBConnection<C> {
         //Get the value object by deserializing the bytes from the db
         let values_cf_handle = self.db.cf_handle(VALUES_CF_NAME).unwrap();
         if let Some(value_bytes) = self.db.get_pinned_cf(values_cf_handle, record_id.to_le_bytes())? {
-            #[cfg(not(feature = "bitcode"))]
-            let value : ValueT = self.coder.decode_fmt1_from_bytes(&value_bytes).unwrap();
-            #[cfg(feature = "bitcode")]
-            let value : ValueT = CONST_CODER.decode_fmt1_from_bytes(&value_bytes).unwrap();
-
+            let value : ValueT = self.value_coder.decode_fmt1_from_bytes(&value_bytes).unwrap();
             Ok(value)
         } else {
             Err("Invalid record_id".to_string())
         }
+    }
+
+    /// Deletes a record's value in the values table
+    /// 
+    /// This should only be called as part of another operation as it leaves the record in an
+    /// inconsistent state
+    pub fn delete_value(&mut self, record_id : RecordID) -> Result<(), String> {
+
+        let value_cf_handle = self.db.cf_handle(VALUES_CF_NAME).unwrap();
+        self.db.delete_cf(value_cf_handle, record_id.to_le_bytes())?;
+
+        Ok(())
+    }
+
+    /// Creates entries in the values table
+    /// If we are updating an old record, we will overwrite it.
+    /// 
+    /// NOTE: This function will NOT update any variants used to locate the key
+    pub fn put_value<ValueT : 'static + Serialize + serde::de::DeserializeOwned>(&mut self, record_id : RecordID, value : &ValueT) -> Result<(), String> {
+
+        //Serialize the value and put it in the values table.
+        let value_cf_handle = self.db.cf_handle(VALUES_CF_NAME).unwrap();
+        let value_bytes = self.value_coder.encode_fmt1_to_buf(value).unwrap();
+        self.db.put_cf(value_cf_handle, record_id.to_le_bytes(), value_bytes)?;
+
+        Ok(())
     }
 
     /// Returns the version of the crate this DB was created with
@@ -261,10 +280,11 @@ impl<C: Coder> DBConnection<C> {
     pub fn get_config(&self) -> Result<TableMetadata, String> {
 
         //Get the value object by deserializing the bytes from the db
-        let version_cf_handle = self.db.cf_handle(METADATA_CF_NAME).unwrap();
-        if let Some(value_bytes) = self.db.get_pinned_cf(version_cf_handle, [1])? {
-            let value = self.coder.decode_fmt1_from_bytes(&value_bytes).unwrap();
-            Ok(value)
+        let metadata_cf_handle = self.db.cf_handle(METADATA_CF_NAME).unwrap();
+        if let Some(config_bytes) = self.db.get_pinned_cf(metadata_cf_handle, [1])? {
+            let config = internal_coder!().decode_fmt1_from_bytes(&config_bytes)
+                .map_err(|_e| format!("Error decoding table metadata, probably caused by a change to fuzzy_rocks coder feature flags"))?;
+            Ok(config)
         } else {
             Err("Error: No config metadata found for table.  The table was likely built with an old version of fuzzy_rocks".to_string())
         }
@@ -272,39 +292,11 @@ impl<C: Coder> DBConnection<C> {
 
     /// Puts current DB config into metadata table
     pub fn put_config<ConfigT : TableConfig>(&mut self) -> Result<(), String> {
-        let value_cf_handle = self.db.cf_handle(METADATA_CF_NAME).unwrap();
+
+        let metadata_cf_handle = self.db.cf_handle(METADATA_CF_NAME).unwrap();
         let config = ConfigT::metadata();
-        let value_bytes = self.coder.encode_fmt1_to_buf(&config).unwrap();
-        self.db.put_cf(value_cf_handle, [1], value_bytes)?;
-
-        Ok(())
-    }
-
-    /// Deletes a record's value in the values table
-    /// 
-    /// This should only be called as part of another operation as it leaves the record in an
-    /// inconsistent state
-    pub fn delete_value(&mut self, record_id : RecordID) -> Result<(), String> {
-
-        let value_cf_handle = self.db.cf_handle(VALUES_CF_NAME).unwrap();
-        self.db.delete_cf(value_cf_handle, record_id.to_le_bytes())?;
-
-        Ok(())
-    }
-
-    /// Creates entries in the values table
-    /// If we are updating an old record, we will overwrite it.
-    /// 
-    /// NOTE: This function will NOT update any variants used to locate the key
-    pub fn put_value<ValueT : 'static + Serialize + serde::de::DeserializeOwned>(&mut self, record_id : RecordID, value : &ValueT) -> Result<(), String> {
-
-        //Serialize the value and put it in the values table.
-        let value_cf_handle = self.db.cf_handle(VALUES_CF_NAME).unwrap();
-        #[cfg(not(feature = "bitcode"))]
-        let value_bytes = self.coder.encode_fmt1_to_buf(value).unwrap();
-        #[cfg(feature = "bitcode")]
-        let value_bytes = CONST_CODER.encode_fmt1_to_buf(value).unwrap();
-        self.db.put_cf(value_cf_handle, record_id.to_le_bytes(), value_bytes)?;
+        let config_bytes = internal_coder!().encode_fmt1_to_buf(&config).unwrap();
+        self.db.put_cf(metadata_cf_handle, [1], config_bytes)?;
 
         Ok(())
     }
@@ -356,19 +348,19 @@ impl<C: Coder> DBConnection<C> {
 
             if let Some(variant_entry_bytes) = self.db.get_pinned_cf(variants_cf_handle, variant)? {
 
-                let variant_entry_len = self.coder.fmt2_list_len(&variant_entry_bytes).unwrap();
+                let variant_entry_len = internal_coder!().fmt2_list_len(&variant_entry_bytes).unwrap();
 
                 //If the variant entry references more than one record, rebuild it with our records absent
                 if variant_entry_len > 1 {
                     let mut new_vec : Vec<KeyGroupID> = Vec::with_capacity(variant_entry_len-1);
-                    let decoded_vec : Vec<KeyGroupID> = self.coder.decode_fmt2_from_bytes(&variant_entry_bytes).unwrap();
+                    let decoded_vec : Vec<KeyGroupID> = internal_coder!().decode_fmt2_from_bytes(&variant_entry_bytes).unwrap();
                     for other_key_group_id in decoded_vec {
                         if other_key_group_id != key_group {
                             new_vec.push(other_key_group_id);
                         }
                     }
 
-                    self.db.put_cf(variants_cf_handle, variant, self.coder.encode_fmt2_list_to_buf(&new_vec).unwrap())?;
+                    self.db.put_cf(variants_cf_handle, variant, internal_coder!().encode_fmt2_list_to_buf(&new_vec).unwrap())?;
                 } else {
                     //Otherwise, remove the variant entry entirely
                     self.db.delete_cf(variants_cf_handle, variant)?;
@@ -384,7 +376,7 @@ impl<C: Coder> DBConnection<C> {
 
         // Creates a Vec<KeyGroupID> with one entry, serialized out as a string of bytes
         let new_variant_vec = |key_group : KeyGroupID| -> Vec<u8> {
-            self.coder.encode_fmt2_list_to_buf(&vec![key_group]).unwrap()
+            internal_coder!().encode_fmt2_list_to_buf(&vec![key_group]).unwrap()
         };
 
         //Add the key_group to each variant
@@ -409,7 +401,7 @@ impl<C: Coder + Send + Sync> Drop for DBConnection<C> {
 }
 
 // The function to add a new entry for a variant in the database, formulated as a RocksDB callback
-fn variant_append_merge<C: Coder>(coder: &C, _key: &[u8], existing_val: Option<&[u8]>, operands: &MergeOperands) -> Option<Vec<u8>> {
+fn variant_append_merge(_key: &[u8], existing_val: Option<&[u8]>, operands: &MergeOperands) -> Option<Vec<u8>> {
 
     // Note: I've seen this function be called at odd times by RocksDB, such as when a DB is
     // opened.  I haven't been able to get a straight answer on why RocksDB calls this function
@@ -424,7 +416,7 @@ fn variant_append_merge<C: Coder>(coder: &C, _key: &[u8], existing_val: Option<&
     //Deserialize the existing database entry into a vec of KeyGroupIDs
     //NOTE: we're actually using a HashSet because we don't want any duplicates
     let mut variant_vec = if let Some(existing_bytes) = existing_val {
-        let new_vec : HashSet<KeyGroupID> = coder.decode_fmt2_from_bytes(existing_bytes).unwrap();
+        let new_vec : HashSet<KeyGroupID> = internal_coder!().decode_fmt2_from_bytes(existing_bytes).unwrap();
         new_vec
     } else {
         //TODO: Remove status println!()
@@ -435,7 +427,7 @@ fn variant_append_merge<C: Coder>(coder: &C, _key: &[u8], existing_val: Option<&
     //Add the new KeyGroupID(s)
     for op in operands_iter {
         //Deserialize the vec on the operand, and merge its entries into the existing vec
-        let operand_vec : HashSet<KeyGroupID> = coder.decode_fmt2_from_bytes(op).unwrap();
+        let operand_vec : HashSet<KeyGroupID> = internal_coder!().decode_fmt2_from_bytes(op).unwrap();
         variant_vec.extend(operand_vec);
     }
 
@@ -443,7 +435,7 @@ fn variant_append_merge<C: Coder>(coder: &C, _key: &[u8], existing_val: Option<&
     // println!("AppendResults {:?}", variant_vec);
 
     //Serialize the vec back out again
-    coder.encode_fmt2_to_buf(&variant_vec).ok()
+    internal_coder!().encode_fmt2_to_buf(&variant_vec).ok()
 }
 
 // Returns the usize that is one larger than the largest key, assuming the column family contains a
