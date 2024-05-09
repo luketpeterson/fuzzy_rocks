@@ -16,6 +16,7 @@ use super::sym_spell::*;
 use super::key_groups::*;
 use super::perf_counters::*;
 use crate::Coder;
+use crate::encode_decode::internal_coder;
 
 /// A collection containing records that may be searched using [Key]s
 ///
@@ -32,7 +33,6 @@ use crate::Coder;
 pub struct Table<ConfigT : TableConfig, const UTF8_KEYS : bool> {
     record_count : usize,
     db : DBConnection<ConfigT::CoderT>,
-    coder: ConfigT::CoderT,
     config : ConfigT,
     deleted_records : Vec<RecordID>, //NOTE: Currently we don't try to hold onto deleted records across unloads, but we may change this in the future.
     perf_counters : PerfCounters,
@@ -64,11 +64,7 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
     {
 
     /// Creates a new Table, backed by the database at the path provided
-    /// 
-    /// WARNING:  No sanity checks are performed to ensure the database being opened matches the parameters
-    /// of the table being created.  Therefore you may see bugs if you are opening a table that was created
-    /// using a different set of parameters.
-    /// 
+    ///
     /// NOTE: [rocksdb::Error] is a wrapper around a string, so if an error occurs it will be the
     /// unwrapped RocksDB error.
     pub fn new(path : &str, config : ConfigT) -> Result<Self, String> {
@@ -80,7 +76,28 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
         }
 
         //Open the Database
-        let db = DBConnection::new(ConfigT::CoderT::new(), path)?;
+        let mut db = DBConnection::new(ConfigT::CoderT::new(), path)?;
+
+        //Get the version from the DB, so we don't try and work with an incompatible database
+        let version = match db.table_is_empty()? {
+            true => {
+                db.put_version()?;
+                db.put_config::<ConfigT>()?;
+                env!("CARGO_PKG_VERSION").to_owned()
+            },
+            false => {
+                db.get_version()?
+            }
+        };
+
+        if version != env!("CARGO_PKG_VERSION") {
+            return Err(format!("DB was created with incompatible version of fuzzy_rocks. DB-version = {version}"))
+        }
+
+        let stored_config = db.get_config()?;
+        if stored_config != ConfigT::metadata() {
+            return Err(format!("DB was created with a different Table configuration: {stored_config:?}"));
+        }
 
         //Find the next value for new RecordIDs, by probing the entries in the "rec_data" column family
         let record_count = db.record_count()?;
@@ -89,7 +106,6 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
             record_count,
             config,
             db,
-            coder: ConfigT::CoderT::new(),
             deleted_records : vec![],
             perf_counters : PerfCounters::new(),
         })
@@ -440,7 +456,7 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
             }
 
             // Call the visitor for each KeyGroup we found
-            let decoded_vec : Vec<KeyGroupID> = self.coder.decode_fmt2_from_bytes(variant_vec_bytes).unwrap();
+            let decoded_vec : Vec<KeyGroupID> = internal_coder!().decode_fmt2_from_bytes(variant_vec_bytes).unwrap();
             for key_group_id in decoded_vec {
                 visitor(key_group_id);
             }
@@ -641,7 +657,7 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
             record_ids = if meaningful_noop {
 
                 //If the meaningful_key exactly equals our key, we can just return the variant's results
-                let decoded_vec : Vec<KeyGroupID> = self.coder.decode_fmt2_from_bytes(variant_vec_bytes).unwrap();
+                let decoded_vec : Vec<KeyGroupID> = internal_coder!().decode_fmt2_from_bytes(variant_vec_bytes).unwrap();
                 decoded_vec.into_iter().map(|key_group_id| key_group_id.record_id()).collect()
 
             } else {
@@ -649,7 +665,7 @@ impl <OwnedKeyT, ConfigT : TableConfig, const UTF8_KEYS : bool>Table<ConfigT, UT
                 //But if they are different, we need to Iterate every KeyGroupID in the variant in order
                 //  to check if we really have a match on the whole key
                 let owned_lookup_key = <Self as TableKeyEncoding>::OwnedKeyT::from_key(lookup_key);
-                let decoded_vec : Vec<KeyGroupID> = self.coder.decode_fmt2_from_bytes(variant_vec_bytes).unwrap();
+                let decoded_vec : Vec<KeyGroupID> = internal_coder!().decode_fmt2_from_bytes(variant_vec_bytes).unwrap();
                 decoded_vec.into_iter().filter_map(|key_group_id| {
 
                     // Return only the KeyGroupIDs for records if their keys match the key we are looking up
