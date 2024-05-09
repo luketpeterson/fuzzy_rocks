@@ -246,7 +246,7 @@ mod tests {
   fn test_encode_len() {
     let coder = crate::DefaultCoder::new();
 
-    let data = coder.encode_fmt1_to_buf::<String>(&"test".to_string()).unwrap();
+    let data = coder.encode_fmt1_list_to_buf(&"test".as_bytes()).unwrap();
 
     let len = coder.fmt1_list_len(&data).unwrap();
 
